@@ -12,6 +12,9 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
+<!-- Солнечная система (рисуется в solar.js) — фон всей верхней части экрана -->
+<div class="hero"><canvas id="solar" aria-label="Солнечная система" role="img"></canvas></div>
+
 <div class="wrap">
 
   <!-- Переключатель времени суток: плашка с «жидким» ползунком в стиле iOS -->
@@ -31,8 +34,8 @@
     </button>
   </div>
 
-  <!-- Солнечная система (рисуется в solar.js) -->
-  <div class="hero"><canvas id="solar" aria-label="Солнечная система" role="img"></canvas></div>
+  <!-- Место под солнечную систему: сама она лежит в фоне -->
+  <div class="hero-space"></div>
 
   <h1 id="title">Спокойной ночи</h1>
   <p class="sub" id="subtitle"></p>

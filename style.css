@@ -9,9 +9,6 @@
   --accent:#CFEE5B; --accent-text:#CFEE5B; --on-accent:#10140A;
   --text:#F3F6E8; --muted:#8A9077;
   --glow:rgba(207,238,91,0.2); --ring:#8FA83F; --dot-idle:#4A5138;
-  --seg-bg:rgba(255,255,255,0.06); --seg-border:rgba(255,255,255,0.08);
-  --seg-thumb:rgba(255,255,255,0.13);
-  --seg-thumb-shadow:inset 0 1px 0 rgba(255,255,255,0.18), 0 6px 18px rgba(0,0,0,0.45);
 
   box-sizing: border-box;
   padding-top: env(safe-area-inset-top, 0px);
@@ -25,9 +22,6 @@
   --accent:#F2994A; --accent-text:#B05E14; --on-accent:#2B1606;
   --text:#2A1F16; --muted:#7A6856;
   --glow:rgba(242,153,74,0.28); --ring:#F2B984; --dot-idle:#E5D5C1;
-  --seg-bg:rgba(120,80,30,0.08); --seg-border:rgba(120,80,30,0.06);
-  --seg-thumb:rgba(255,255,255,0.95);
-  --seg-thumb-shadow:inset 0 1px 0 #fff, 0 6px 18px rgba(120,80,30,0.18);
 }
 
 /* День — светлая свежая тема, цвета неба */
@@ -37,9 +31,6 @@
   --accent:#2E9CC4; --accent-text:#1F7FA3; --on-accent:#FFFFFF;
   --text:#12262E; --muted:#5B7681;
   --glow:rgba(46,156,196,0.24); --ring:#8CC7DC; --dot-idle:#C9DAE1;
-  --seg-bg:rgba(20,70,90,0.08); --seg-border:rgba(20,70,90,0.06);
-  --seg-thumb:rgba(255,255,255,0.95);
-  --seg-thumb-shadow:inset 0 1px 0 #fff, 0 6px 18px rgba(20,70,90,0.18);
 }
 
 * { box-sizing: border-box; }
@@ -54,7 +45,7 @@ body {
 .wrap { width: 100%; max-width: 420px; display: flex; flex-direction: column; align-items: center; }
 
 /* Плавная смена цветов при переключении темы */
-.card, .hero, #playBtn, .seg, .list-row, .dot {
+.card, #playBtn, .list-row, .dot {
   transition: background-color .6s ease, border-color .6s ease, color .6s ease;
 }
 
@@ -63,8 +54,10 @@ body {
   position: relative; width: 100%;
   display: grid; grid-template-columns: repeat(3, 1fr);
   padding: 6px; margin-bottom: 18px; border-radius: 999px;
-  background: var(--seg-bg); border: 1px solid var(--seg-border);
-  -webkit-backdrop-filter: blur(20px); backdrop-filter: blur(20px);
+  /* тёмное стекло — переключатель всегда парит над космосом */
+  background: rgba(12, 14, 28, 0.38); border: 1px solid rgba(255,255,255,0.12);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.08), 0 10px 30px rgba(0,0,0,0.25);
+  -webkit-backdrop-filter: blur(20px) saturate(1.4); backdrop-filter: blur(20px) saturate(1.4);
   touch-action: pan-y;   /* горизонтальное движение пальца отдаём ползунку */
   user-select: none; -webkit-user-select: none;
 }
@@ -72,8 +65,8 @@ body {
   position: absolute; top: 6px; bottom: 6px; left: 6px;
   width: calc((100% - 12px) / 3);
   border-radius: 999px;
-  background: var(--seg-thumb);
-  box-shadow: var(--seg-thumb-shadow);
+  background: rgba(255,255,255,0.18);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.3), inset 0 -1px 0 rgba(255,255,255,0.06), 0 6px 18px rgba(0,0,0,0.3);
   -webkit-backdrop-filter: blur(12px) saturate(1.6); backdrop-filter: blur(12px) saturate(1.6);
   /* пружинистое движение с лёгким перелётом, как в iOS */
   transition: transform .55s cubic-bezier(.3, 1.4, .5, 1), scale .3s ease, background-color .6s ease;
@@ -95,26 +88,32 @@ body {
   display: flex; flex-direction: column; align-items: center; gap: 3px;
   padding: 9px 4px 8px; border: none; background: none; cursor: pointer;
   font-family: inherit; font-size: .82rem; font-weight: 700;
-  color: var(--muted); transition: color .3s ease;
+  color: rgba(255,255,255,0.62); transition: color .3s ease;
 }
 .seg-btn svg {
   width: 24px; height: 24px; fill: none; stroke: currentColor;
   stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
 }
-.seg-btn[aria-selected="true"] { color: var(--text); }
+.seg-btn[aria-selected="true"] { color: #fff; }
 .seg-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 999px; }
 
 /* ---------- Солнечная система ---------- */
 @keyframes pulse { 0%,100%{opacity:.5; transform:scale(1);} 50%{opacity:1; transform:scale(1.15);} }
 .dot-live { animation: pulse 1.6s ease-in-out infinite; }
 
+/* Космос занимает весь верх экрана от края до края и снизу растворяется в фоне страницы */
 .hero {
-  position: relative; width: 100%; aspect-ratio: 1 / 0.68;
-  border-radius: 28px; overflow: hidden; margin-bottom: 20px;
-  background: #05060E; border: 1px solid var(--border);
-  box-shadow: 0 14px 40px rgba(0,0,0,0.18);
+  position: absolute; top: 0; left: 0; right: 0; z-index: 0;
+  height: calc(410px + env(safe-area-inset-top, 0px));
+  pointer-events: none;
 }
-.hero canvas { display: block; width: 100%; height: 100%; }
+.hero canvas {
+  display: block; width: 100%; height: 100%;
+  -webkit-mask-image: linear-gradient(to bottom, #000 58%, transparent 100%);
+          mask-image: linear-gradient(to bottom, #000 58%, transparent 100%);
+}
+.wrap { position: relative; z-index: 1; }
+.hero-space { height: 222px; }
 
 h1 { font-weight:800; font-size:1.5rem; text-align:center; margin:0 0 8px; max-width:20ch; }
 p.sub { color:var(--muted); font-size:.88rem; text-align:center; line-height:1.5; max-width:34ch; margin:0 0 24px; }

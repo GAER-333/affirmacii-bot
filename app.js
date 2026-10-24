@@ -22,6 +22,8 @@
   // --- Настройки ---
   var TIMES = ['morning', 'day', 'night'];
   var THEME_BG = { morning: '#FBF3E9', day: '#EDF4F7', night: '#0D0F08' };
+  // Шапка Telegram красится в цвет неба сверху — без шва с солнечной системой
+  var SKY_TOP = { morning: '#281E52', day: '#0E346C', night: '#03050D' };
   var INPUT_HINT = { morning: 'Своя фраза для утра', day: 'Своя фраза для дня', night: 'Своя фраза для ночи' };
   var PAUSE_MS = 3200;        // пауза между фразами
   var MUSIC_VOLUME_DB = -12;  // громкость фоновой музыки (0 — максимум, чем меньше, тем тише)
@@ -191,7 +193,7 @@
     document.documentElement.setAttribute('data-time', state.time);
     if (window.SolarSystem) SolarSystem.setMode(state.time, instant);
     if (inTelegram) {
-      try { tg.setHeaderColor(THEME_BG[state.time]); tg.setBackgroundColor(THEME_BG[state.time]); } catch (e) {}
+      try { tg.setHeaderColor(SKY_TOP[state.time]); tg.setBackgroundColor(THEME_BG[state.time]); } catch (e) {}
     }
   }
 

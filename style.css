@@ -8,7 +8,10 @@
   --bg:#0D0F08; --panel:#15180F; --border:#262B19;
   --accent:#CFEE5B; --accent-text:#CFEE5B; --on-accent:#10140A;
   --text:#F3F6E8; --muted:#8A9077;
-  --glow:rgba(207,238,91,0.2); --ring:#8FA83F; --dot-idle:#4A5138;
+  --dot-idle:#4A5138;
+  /* стекло нижней панели плеера */
+  --glass-bg:rgba(12,14,28,0.45); --glass-border:rgba(255,255,255,0.12);
+  --glass-highlight:rgba(255,255,255,0.08); --glass-icon:#F3F6E8; --glass-hover:rgba(255,255,255,0.1);
 
   box-sizing: border-box;
   padding-top: env(safe-area-inset-top, 0px);
@@ -21,7 +24,9 @@
   --bg:#FBF3E9; --panel:#FFFFFF; --border:#F0E2CF;
   --accent:#F2994A; --accent-text:#B05E14; --on-accent:#2B1606;
   --text:#2A1F16; --muted:#7A6856;
-  --glow:rgba(242,153,74,0.28); --ring:#F2B984; --dot-idle:#E5D5C1;
+  --dot-idle:#E5D5C1;
+  --glass-bg:rgba(255,250,244,0.62); --glass-border:rgba(120,80,30,0.12);
+  --glass-highlight:rgba(255,255,255,0.9); --glass-icon:#2A1F16; --glass-hover:rgba(120,80,30,0.08);
 }
 
 /* День — светлая свежая тема, цвета неба */
@@ -30,7 +35,9 @@
   --bg:#EDF4F7; --panel:#FFFFFF; --border:#D8E5EB;
   --accent:#2E9CC4; --accent-text:#1F7FA3; --on-accent:#FFFFFF;
   --text:#12262E; --muted:#5B7681;
-  --glow:rgba(46,156,196,0.24); --ring:#8CC7DC; --dot-idle:#C9DAE1;
+  --dot-idle:#C9DAE1;
+  --glass-bg:rgba(250,253,255,0.62); --glass-border:rgba(20,70,90,0.12);
+  --glass-highlight:rgba(255,255,255,0.9); --glass-icon:#12262E; --glass-hover:rgba(20,70,90,0.08);
 }
 
 * { box-sizing: border-box; }
@@ -175,13 +182,67 @@ p.sub { color:var(--muted); font-size:.88rem; text-align:center; line-height:1.5
 }
 
 /* ---------- Кнопка воспроизведения ---------- */
-#playBtn {
-  width:100%; border:none; border-radius:999px; padding:16px 22px; font-weight:800; font-size:1rem;
-  margin-bottom:14px; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:8px;
-  background:var(--accent); color:var(--on-accent); font-family:inherit;
-  position: sticky; bottom: calc(14px + env(safe-area-inset-bottom, 0px));
-  box-shadow: 0 8px 24px rgba(0,0,0,0.18);
+/* ---------- Панель плеера ---------- */
+/* Одна стеклянная плашка, как переключатель времени суток сверху */
+.player {
+  width:100%; display:flex; align-items:center; gap:4px; margin-bottom:14px;
+  padding:6px; border-radius:999px;
+  position: sticky; bottom: calc(14px + env(safe-area-inset-bottom, 0px)); z-index: 2;
+  background: var(--glass-bg); border: 1px solid var(--glass-border);
+  box-shadow: inset 0 1px 0 var(--glass-highlight), 0 10px 30px rgba(0,0,0,0.22);
+  -webkit-backdrop-filter: blur(20px) saturate(1.4); backdrop-filter: blur(20px) saturate(1.4);
+  transition: background-color .6s ease, border-color .6s ease;
 }
+#playBtn {
+  flex:1; border:none; border-radius:999px; padding:14px 22px; font-weight:800; font-size:1rem;
+  cursor:pointer; display:flex; align-items:center; justify-content:center; gap:8px;
+  background:var(--accent); color:var(--on-accent); font-family:inherit;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.35), 0 4px 14px rgba(0,0,0,0.18);
+}
+.player-side {
+  width:50px; height:50px; flex-shrink:0; border-radius:50%; cursor:pointer;
+  display:flex; align-items:center; justify-content:center;
+  background:none; border:none; color:var(--glass-icon);
+  transition: background-color .2s ease, color .6s ease, opacity .2s ease;
+}
+.player-side:hover:not(:disabled) { background: var(--glass-hover); }
+.player-side svg { width:22px; height:22px; fill:currentColor; stroke:currentColor; stroke-width:2; stroke-linejoin:round; stroke-linecap:round; }
+.player-side:disabled { opacity:.4; cursor:default; }
+.player button:active:not(:disabled) { transform: scale(.96); }
+
+/* ---------- Прогресс ---------- */
+.progress-row { flex-direction:column; align-items:stretch; gap:10px; }
+.progress-top, .sleep-top { display:flex; justify-content:space-between; align-items:center; gap:12px; }
+.progress-track { height:4px; border-radius:999px; background:var(--border); overflow:hidden; }
+.progress-fill { height:100%; width:0; border-radius:999px; background:var(--accent); transition: width .5s ease; }
+
+/* ---------- Громкость музыки ---------- */
+.volume { flex:1; display:flex; align-items:center; gap:10px; max-width:230px; color:var(--muted); }
+.volume svg { width:18px; height:18px; flex-shrink:0; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }
+#musicVolume {
+  flex:1; min-width:0; height:4px; margin:0; border-radius:999px; cursor:pointer;
+  -webkit-appearance:none; appearance:none;
+  background: linear-gradient(to right, var(--accent) var(--fill, 50%), var(--border) var(--fill, 50%));
+}
+#musicVolume::-webkit-slider-thumb {
+  -webkit-appearance:none; width:22px; height:22px; border-radius:50%;
+  background:#fff; border:none; box-shadow:0 2px 8px rgba(0,0,0,0.3);
+}
+#musicVolume::-moz-range-thumb {
+  width:22px; height:22px; border-radius:50%; background:#fff; border:none; box-shadow:0 2px 8px rgba(0,0,0,0.3);
+}
+#musicVolume:focus-visible { outline:2px solid var(--accent); outline-offset:6px; }
+
+/* ---------- Таймер сна ---------- */
+.sleep-row { flex-direction:column; align-items:stretch; gap:10px; }
+.sleep-left { font-size:.8rem; font-weight:700; color:var(--accent-text); font-variant-numeric: tabular-nums; }
+.chips { display:grid; grid-template-columns:repeat(4, 1fr); gap:6px; }
+.chips button {
+  border:1px solid var(--border); background:none; border-radius:999px; padding:8px 4px; cursor:pointer;
+  font-family:inherit; font-size:.8rem; font-weight:700; color:var(--muted);
+  transition: background-color .25s ease, color .25s ease, border-color .25s ease;
+}
+.chips button[aria-pressed="true"] { background:var(--accent); border-color:var(--accent); color:var(--on-accent); }
 #statusMsg { color:var(--accent-text); font-size:.8rem; text-align:center; margin-top:4px; line-height:1.5; min-height:1em; }
 
 @media (prefers-reduced-motion: reduce) {

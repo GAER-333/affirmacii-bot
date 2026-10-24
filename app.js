@@ -26,7 +26,7 @@
   var SKY_TOP = { morning: '#281E52', day: '#0E346C', night: '#03050D' };
   var INPUT_HINT = { morning: 'Своя фраза для утра', day: 'Своя фраза для дня', night: 'Своя фраза для ночи' };
   var PAUSE_MS = 3200;        // пауза между фразами
-  var MUSIC_VOLUME_DB = -12;  // базовая громкость файла с музыкой; ползунок меняет её относительно этой точки
+  var MUSIC_VOLUME_DB = -12;  // насколько музыка тише голоса; ползунок меняет громкость относительно этой точки
 
   function timeByClock() {
     var h = new Date().getHours();
@@ -404,28 +404,75 @@
   }
 
   // --- Фоновая музыка ---
-  // Если есть файл audio/music/<время>.mp3 — играет он, по кругу.
-  // Если нет — включается мягкий синтезатор из прототипа.
+  // Треки лежат в audio/music: night.mp3, night-2.mp3, night-3.mp3… — свои для каждого времени суток.
+  // Играют по очереди и по кругу, с плавным перекрёстным переходом — без провалов и щелчков на стыке.
+  // Если файлов нет — включается мягкий синтезатор из прототипа.
   // Голос идёт мимо Tone.js, поэтому громкость Tone.Destination меняет только музыку.
-  var musicPlayers = {};
+  var MAX_TRACKS = 5;        // сколько треков на одно время суток ищем максимум
+  var CROSSFADE_S = 4;       // на сколько секунд следующий трек накладывается на конец предыдущего
+  var TARGET_RMS_DB = -24;   // к этой средней громкости выравниваются все треки
+  var musicLibrary = {};     // время суток → Promise со списком загруженных треков
+  var deck = null;           // два плеера по очереди — чтобы треки могли перекрываться
+  var musicTime = null, musicTrack = 0;
   var synth = null, reverb = null, loop = null;
+
+  function musicUrl(time, k) { return 'audio/music/' + time + (k ? '-' + (k + 1) : '') + '.mp3'; }
+
+  // Загружаем треки по порядку, пока не встретится отсутствующий файл
+  function loadTracks(time) {
+    if (musicLibrary[time]) return musicLibrary[time];
+    var tracks = [];
+    function load(k) {
+      if (k >= MAX_TRACKS) return Promise.resolve(tracks);
+      return new Tone.ToneAudioBuffer().load(musicUrl(time, k)).then(function (buf) {
+        var info = describeTrack(buf);
+        if (info.length > CROSSFADE_S * 3) tracks.push(info);
+        return load(k + 1);
+      }, function () { return tracks; });
+    }
+    musicLibrary[time] = load(0);
+    return musicLibrary[time];
+  }
+
+  // Где в треке начинается и заканчивается звук (обрезаем тишину) и насколько он громкий
+  function describeTrack(buf) {
+    var raw = buf.get(), data = raw.getChannelData(0), sr = raw.sampleRate, n = data.length;
+    var lead = 0; while (lead < n && Math.abs(data[lead]) < 0.003) lead++;
+    var tail = n - 1; while (tail > lead && Math.abs(data[tail]) < 0.003) tail--;
+    var sum = 0, count = 0;
+    for (var i = lead; i < tail; i += 16) { sum += data[i] * data[i]; count++; }
+    var rmsDb = 10 * Math.log10(sum / Math.max(1, count) || 1e-12);
+    return {
+      buffer: buf, start: lead / sr, length: (tail - lead) / sr,
+      gainDb: Math.max(-8, Math.min(8, TARGET_RMS_DB - rmsDb)),
+    };
+  }
 
   function startMusic() {
     if (state.mode !== 'playing') return;
     var time = state.time;
-    var url = 'audio/music/' + time + '.mp3';
-    if (missing[url]) { startSynth(); return; }
-    var player = musicPlayers[time];
-    if (player && player.loaded) { if (player.state !== 'started') player.start(); return; }
-    if (!player) {
-      player = musicPlayers[time] = new Tone.Player({ loop: true, fadeIn: 2.5, fadeOut: 1.5, volume: MUSIC_VOLUME_DB }).toDestination();
-    }
-    player.load(url).then(function () {
-      if (state.mode === 'playing' && state.time === time && player.state !== 'started') player.start();
-    }).catch(function () {
-      missing[url] = true;
-      player.dispose(); delete musicPlayers[time];
-      if (state.mode === 'playing' && state.time === time) startSynth();
+    if (musicTime !== time) { musicTime = time; musicTrack = 0; }
+    loadTracks(time).then(function (tracks) {
+      if (state.mode !== 'playing' || state.time !== time) return;
+      if (!tracks.length) { startSynth(); return; }
+      if (!deck) deck = [0, 1].map(function () { return new Tone.Player({ fadeIn: 2, fadeOut: 2 }).toDestination(); });
+      Tone.Transport.cancel();
+      Tone.Transport.stop();
+      // Ставим трек k в очередь; когда он начнётся — сразу планируем следующий
+      var queue = function (k, when) {
+        Tone.Transport.scheduleOnce(function (t) {
+          if (state.mode !== 'playing') return;
+          var tr = tracks[k % tracks.length];
+          var player = deck[k % 2];
+          player.buffer = tr.buffer;
+          player.volume.value = MUSIC_VOLUME_DB + tr.gainDb;
+          player.start(t, tr.start, tr.length);
+          musicTrack = k % tracks.length;
+          queue(k + 1, when + tr.length - CROSSFADE_S);
+        }, when);
+      };
+      queue(musicTrack, 0);
+      Tone.Transport.start();
     });
   }
 
@@ -451,10 +498,8 @@
   }
 
   function stopMusic() {
-    Object.keys(musicPlayers).forEach(function (k) {
-      var p = musicPlayers[k];
-      if (p.state === 'started') p.stop();
-    });
+    if (deck) deck.forEach(function (p) { if (p.state === 'started') p.stop(); }); // с плавным затуханием
+    Tone.Transport.cancel();
     if (loop) loop.stop(0);
     if (synth) synth.releaseAll();
     Tone.Transport.stop();

@@ -1,80 +1,191 @@
+/* ---------- Темы ----------
+   Цвета задаются переменными. Атрибут data-time на <html> (morning / day / night)
+   переключает весь набор переменных сразу — так меняется тема всего приложения. */
+
+/* Ночь — тёмная тема (по умолчанию) */
 :root {
   color-scheme: dark;
   --bg:#0D0F08; --panel:#15180F; --border:#262B19;
-  --accent:#CFEE5B; --accent-dim:#8FA83F; --text:#F3F6E8; --muted:#8A9077;
+  --accent:#CFEE5B; --accent-text:#CFEE5B; --on-accent:#10140A;
+  --text:#F3F6E8; --muted:#8A9077;
+  --glow:rgba(207,238,91,0.2); --ring:#8FA83F; --dot-idle:#4A5138;
+  --seg-bg:rgba(255,255,255,0.06); --seg-border:rgba(255,255,255,0.08);
+  --seg-thumb:rgba(255,255,255,0.13);
+  --seg-thumb-shadow:inset 0 1px 0 rgba(255,255,255,0.18), 0 6px 18px rgba(0,0,0,0.45);
+
   box-sizing: border-box;
   padding-top: env(safe-area-inset-top, 0px);
   padding-bottom: env(safe-area-inset-bottom, 0px);
 }
+
+/* Утро — тёплая светлая тема, цвета рассвета */
+:root[data-time="morning"] {
+  color-scheme: light;
+  --bg:#FBF3E9; --panel:#FFFFFF; --border:#F0E2CF;
+  --accent:#F2994A; --accent-text:#B05E14; --on-accent:#2B1606;
+  --text:#2A1F16; --muted:#7A6856;
+  --glow:rgba(242,153,74,0.28); --ring:#F2B984; --dot-idle:#E5D5C1;
+  --seg-bg:rgba(120,80,30,0.08); --seg-border:rgba(120,80,30,0.06);
+  --seg-thumb:rgba(255,255,255,0.95);
+  --seg-thumb-shadow:inset 0 1px 0 #fff, 0 6px 18px rgba(120,80,30,0.18);
+}
+
+/* День — светлая свежая тема, цвета неба */
+:root[data-time="day"] {
+  color-scheme: light;
+  --bg:#EDF4F7; --panel:#FFFFFF; --border:#D8E5EB;
+  --accent:#2E9CC4; --accent-text:#1F7FA3; --on-accent:#FFFFFF;
+  --text:#12262E; --muted:#5B7681;
+  --glow:rgba(46,156,196,0.24); --ring:#8CC7DC; --dot-idle:#C9DAE1;
+  --seg-bg:rgba(20,70,90,0.08); --seg-border:rgba(20,70,90,0.06);
+  --seg-thumb:rgba(255,255,255,0.95);
+  --seg-thumb-shadow:inset 0 1px 0 #fff, 0 6px 18px rgba(20,70,90,0.18);
+}
+
 * { box-sizing: border-box; }
 html { scroll-padding-top: env(safe-area-inset-top, 0px); }
 body {
   margin: 0; background: var(--bg); color: var(--text);
   font-family: 'Manrope', sans-serif; min-height: 100%;
-  display: flex; justify-content: center; padding: 40px 16px 60px;
+  display: flex; justify-content: center; padding: 20px 16px 60px;
   -webkit-tap-highlight-color: transparent;
+  transition: background-color .6s ease, color .6s ease;
 }
 .wrap { width: 100%; max-width: 420px; display: flex; flex-direction: column; align-items: center; }
 
+/* Плавная смена цветов при переключении темы */
+.card, .hero, #playBtn, .seg, .list-row, .dot {
+  transition: background-color .6s ease, border-color .6s ease, color .6s ease;
+}
+
+/* ---------- Переключатель времени суток ---------- */
+.seg {
+  position: relative; width: 100%;
+  display: grid; grid-template-columns: repeat(3, 1fr);
+  padding: 6px; margin-bottom: 18px; border-radius: 999px;
+  background: var(--seg-bg); border: 1px solid var(--seg-border);
+  -webkit-backdrop-filter: blur(20px); backdrop-filter: blur(20px);
+  touch-action: pan-y;   /* горизонтальное движение пальца отдаём ползунку */
+  user-select: none; -webkit-user-select: none;
+}
+.seg-thumb {
+  position: absolute; top: 6px; bottom: 6px; left: 6px;
+  width: calc((100% - 12px) / 3);
+  border-radius: 999px;
+  background: var(--seg-thumb);
+  box-shadow: var(--seg-thumb-shadow);
+  -webkit-backdrop-filter: blur(12px) saturate(1.6); backdrop-filter: blur(12px) saturate(1.6);
+  /* пружинистое движение с лёгким перелётом, как в iOS */
+  transition: transform .55s cubic-bezier(.3, 1.4, .5, 1), scale .3s ease, background-color .6s ease;
+  will-change: transform;
+}
+/* «Жидкое» растяжение во время перелёта */
+.seg-thumb.stretch { animation: stretch .55s ease; }
+@keyframes stretch {
+  0% { scale: 1 1; }
+  35% { scale: 1.12 .9; }
+  70% { scale: .97 1.03; }
+  100% { scale: 1 1; }
+}
+/* Пока тянем пальцем — ползунок «приподнят» и следует за пальцем без задержки */
+.seg.dragging .seg-thumb { transition: scale .2s ease, background-color .6s ease; scale: 1.07; }
+
+.seg-btn {
+  position: relative; z-index: 1;
+  display: flex; flex-direction: column; align-items: center; gap: 3px;
+  padding: 9px 4px 8px; border: none; background: none; cursor: pointer;
+  font-family: inherit; font-size: .82rem; font-weight: 700;
+  color: var(--muted); transition: color .3s ease;
+}
+.seg-btn svg {
+  width: 24px; height: 24px; fill: none; stroke: currentColor;
+  stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
+}
+.seg-btn[aria-selected="true"] { color: var(--text); }
+.seg-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 999px; }
+
+/* ---------- Солнечная система ---------- */
 @keyframes pulse { 0%,100%{opacity:.5; transform:scale(1);} 50%{opacity:1; transform:scale(1.15);} }
-@keyframes ring { 0%,100%{opacity:.25;} 50%{opacity:.55;} }
-@media (prefers-reduced-motion: reduce) { .glow-ring, .dot-live { animation: none !important; } }
-.glow-ring { animation: ring 5s ease-in-out infinite; position:absolute; border-radius:50%; border:1px solid var(--accent-dim); }
 .dot-live { animation: pulse 1.6s ease-in-out infinite; }
 
-.hero { position: relative; width: 150px; height: 150px; margin-bottom: 10px; }
-.hero-core {
-  position:absolute; inset:38px; border-radius:50%;
-  background: radial-gradient(circle, rgba(207,238,91,0.2) 0%, transparent 72%);
-  display:flex; align-items:center; justify-content:center;
+.hero {
+  position: relative; width: 100%; aspect-ratio: 1 / 0.68;
+  border-radius: 28px; overflow: hidden; margin-bottom: 20px;
+  background: #05060E; border: 1px solid var(--border);
+  box-shadow: 0 14px 40px rgba(0,0,0,0.18);
 }
-.hero-badge {
-  width:64px; height:64px; border-radius:50%; background:var(--panel);
-  border:1px solid var(--border); display:flex; align-items:center; justify-content:center; font-size:26px;
-}
+.hero canvas { display: block; width: 100%; height: 100%; }
 
 h1 { font-weight:800; font-size:1.5rem; text-align:center; margin:0 0 8px; max-width:20ch; }
-p.sub { color:var(--muted); font-size:.88rem; text-align:center; line-height:1.5; max-width:32ch; margin:0 0 24px; }
+p.sub { color:var(--muted); font-size:.88rem; text-align:center; line-height:1.5; max-width:34ch; margin:0 0 24px; }
 
-.row-add { width:100%; display:flex; align-items:center; gap:8px; margin-bottom:24px; }
+/* ---------- Карточки ---------- */
+.card { width:100%; background:var(--panel); border:1px solid var(--border); border-radius:20px; padding:6px 18px; margin-bottom:14px; }
+.card-row { display:flex; align-items:center; justify-content:space-between; padding:14px 0; border-bottom:1px solid var(--border); gap:12px; }
+.card-row:last-child { border-bottom:none; }
+.status-label { display:flex; align-items:center; gap:8px; font-weight:700; font-size:.92rem; }
+.dot { width:8px; height:8px; border-radius:50%; background:var(--dot-idle); }
+.dot.live { background:var(--accent); }
+.muted-label { color:var(--muted); font-size:.85rem; white-space:nowrap; }
+.value { font-weight:700; }
+.value.current { max-width:22ch; text-align:right; font-size:.88rem; }
+.value.current.live { color:var(--accent-text); }
+
+/* Список фраз: каждая строка — кнопка, нажатие запускает с этой фразы */
+#listCard { padding:4px 8px; }
+.list-row {
+  width:100%; display:flex; align-items:baseline; gap:12px; text-align:left; user-select:none;
+  padding:12px 10px; border:none; border-bottom:1px solid var(--border); border-radius:0;
+  background:none; color:var(--text); font-family:inherit; cursor:pointer;
+}
+.list-row:last-child { border-bottom:none; }
+.list-row .num { color:var(--muted); font-size:.75rem; font-weight:700; min-width:2ch; }
+.list-row .text { font-size:.9rem; line-height:1.4; flex:1; overflow-wrap:anywhere; }
+.list-row.live .text, .list-row.live .num { color:var(--accent-text); }
+.list-row:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; border-radius:12px; }
+.list-row .tag {
+  display:inline-block; margin-left:6px; padding:1px 7px; border-radius:999px; vertical-align:1px;
+  font-size:.66rem; font-weight:700; color:var(--accent-text); border:1px solid var(--border);
+}
+.remove-btn {
+  align-self:center; flex-shrink:0; width:28px; height:28px; border-radius:50%;
+  border:none; background:none; color:var(--muted); font-size:18px; line-height:1; cursor:pointer;
+}
+.remove-btn:hover { background:var(--border); }
+
+/* ---------- Свои фразы ---------- */
+.row-add { width:100%; display:flex; align-items:center; gap:8px; margin-bottom:8px; }
 #phraseInput {
   flex:1; min-width:0; background:var(--panel); border:1px solid var(--border); border-radius:999px;
   padding:13px 18px; color:var(--text); font-size:1rem; font-family:inherit;
+  transition: background-color .6s ease, border-color .6s ease, color .6s ease;
 }
 #phraseInput::placeholder { color:var(--muted); }
 #phraseInput:focus { outline:2px solid var(--accent); outline-offset:2px; }
 #addBtn {
   width:46px; height:46px; border-radius:50%; flex-shrink:0; border:none;
-  background:var(--accent); color:#10140A; font-size:20px; font-weight:800; cursor:pointer;
+  background:var(--accent); color:var(--on-accent); font-size:22px; font-weight:800; cursor:pointer;
+}
+.custom-note {
+  width:100%; display:flex; justify-content:space-between; align-items:center; gap:10px;
+  padding:0 14px; margin-bottom:18px; font-size:.75rem; color:var(--muted);
+}
+#clearBtn {
+  border:none; background:none; padding:4px 0; cursor:pointer; white-space:nowrap;
+  font-family:inherit; font-size:.75rem; font-weight:700; color:var(--accent-text);
 }
 
-.card { width:100%; background:var(--panel); border:1px solid var(--border); border-radius:20px; padding:6px 18px; margin-bottom:14px; }
-.card-row { display:flex; align-items:center; justify-content:space-between; padding:14px 0; border-bottom:1px solid var(--border); }
-.card-row:last-child { border-bottom:none; }
-.status-label { display:flex; align-items:center; gap:8px; font-weight:700; font-size:.92rem; }
-.dot { width:8px; height:8px; border-radius:50%; background:#4A5138; }
-.dot.live { background:var(--accent); }
-.muted-label { color:var(--muted); font-size:.85rem; }
-
-.list-row { display:flex; align-items:center; justify-content:space-between; padding:14px 0; border-bottom:1px solid var(--border); gap:10px; }
-.list-row:last-child { border-bottom:none; }
-.list-row span.text { font-size:.9rem; flex:1; overflow-wrap:anywhere; }
-.list-row span.text.live { color:var(--accent); }
-.remove-btn { background:none; border:none; color:var(--muted); font-size:16px; cursor:pointer; padding:4px; }
-
+/* ---------- Кнопка воспроизведения ---------- */
 #playBtn {
   width:100%; border:none; border-radius:999px; padding:16px 22px; font-weight:800; font-size:1rem;
   margin-bottom:14px; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:8px;
-  background:var(--panel); color:var(--muted); border:1px solid var(--border); font-family:inherit;
+  background:var(--accent); color:var(--on-accent); font-family:inherit;
+  position: sticky; bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+  box-shadow: 0 8px 24px rgba(0,0,0,0.18);
 }
-#playBtn.active-ready { background:var(--accent); color:#10140A; border:none; }
+#statusMsg { color:var(--accent-text); font-size:.8rem; text-align:center; margin-top:4px; line-height:1.5; min-height:1em; }
 
-.row-bottom { width:100%; display:flex; gap:8px; margin-bottom:8px; }
-#voiceSelect, #clearBtn {
-  background:var(--panel); border:1px solid var(--border); border-radius:14px; color:var(--text);
-  font-family:inherit; font-size:.78rem; padding:10px 12px;
+@media (prefers-reduced-motion: reduce) {
+  .dot-live, .seg-thumb.stretch { animation: none !important; }
+  .seg-thumb { transition: none; }
 }
-#voiceSelect { flex:1; min-width:0; }
-#clearBtn { color:var(--muted); cursor:pointer; display:flex; align-items:center; gap:6px; white-space:nowrap; }
-#statusMsg { color:var(--accent); font-size:.8rem; text-align:center; margin-top:10px; line-height:1.5; min-height:1em; }
-#emptyHint { color:var(--muted); font-size:.82rem; text-align:center; margin:-8px 0 14px; }

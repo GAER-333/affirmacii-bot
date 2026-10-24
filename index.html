@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="ru" data-time="night">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -7,53 +7,69 @@
 <!-- SDK Telegram Mini Apps: даёт доступ к window.Telegram.WebApp (тема, облачное хранилище, вибро и т.д.) -->
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;700;800&display=swap">
-<!-- Tone.js — библиотека для генерации фоновой музыки прямо в браузере -->
+<!-- Tone.js — проигрывает фоновую музыку (и генерирует запасную, если файла с музыкой нет) -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <div class="wrap">
-  <div class="hero">
-    <div class="glow-ring" style="inset:0;"></div>
-    <div class="glow-ring" style="inset:18px; animation-delay:1s;"></div>
-    <div class="hero-core"><div class="hero-badge" id="heroBadge">✨</div></div>
+
+  <!-- Переключатель времени суток: плашка с «жидким» ползунком в стиле iOS -->
+  <div class="seg" id="seg" role="tablist" aria-label="Время дня">
+    <div class="seg-thumb" id="segThumb"></div>
+    <button class="seg-btn" role="tab" data-time="morning">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 18h18M6.3 14.5a6 6 0 0 1 11.4 0M12 4v3M4.9 8.9l1.6 1.6M19.1 8.9l-1.6 1.6M7 21h10"/></svg>
+      <span>Утро</span>
+    </button>
+    <button class="seg-btn" role="tab" data-time="day">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6"/></svg>
+      <span>День</span>
+    </button>
+    <button class="seg-btn" role="tab" data-time="night">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></svg>
+      <span>Ночь</span>
+    </button>
   </div>
 
-  <h1>Слова, которые хочется услышать снова</h1>
-  <p class="sub">Добавьте свои аффирмации — приложение проговорит их под спокойную музыку.</p>
+  <!-- Солнечная система (рисуется в solar.js) -->
+  <div class="hero"><canvas id="solar" aria-label="Солнечная система" role="img"></canvas></div>
 
-  <div class="row-add">
-    <input id="phraseInput" placeholder="Впишите фразу" maxlength="200" />
-    <button id="addBtn" aria-label="Добавить">+</button>
-  </div>
-  <p id="emptyHint" style="display:none;">Добавьте хотя бы одну фразу, чтобы начать</p>
+  <h1 id="title">Спокойной ночи</h1>
+  <p class="sub" id="subtitle"></p>
 
   <div class="card">
     <div class="card-row">
       <div class="status-label"><span class="dot" id="statusDot"></span><span id="statusText">Готово к старту</span></div>
     </div>
     <div class="card-row">
-      <span class="muted-label">Фраз в списке</span>
-      <span style="font-weight:700;" id="countLabel">0</span>
+      <span class="muted-label">Фраз в наборе</span>
+      <span class="value" id="countLabel">0</span>
     </div>
     <div class="card-row">
       <span class="muted-label">Текущая</span>
-      <span style="font-weight:700; max-width:18ch; text-align:right;" id="currentLabel">—</span>
+      <span class="value current" id="currentLabel">—</span>
     </div>
   </div>
 
-  <div class="card" id="listCard" style="display:none;"></div>
+  <div class="card" id="listCard"></div>
 
-  <button id="playBtn" disabled><span id="playIcon">▶</span><span id="playLabel">Слушать</span></button>
-
-  <div class="row-bottom">
-    <select id="voiceSelect" style="display:none;"></select>
-    <button id="clearBtn" style="display:none;">🗑 Очистить</button>
+  <!-- Свои фразы -->
+  <div class="row-add">
+    <input id="phraseInput" placeholder="Своя фраза" maxlength="200" enterkeyhint="done" />
+    <button id="addBtn" aria-label="Добавить фразу">+</button>
   </div>
+  <div class="custom-note">
+    <span>Свои фразы пока читает голос устройства</span>
+    <button id="clearBtn" hidden>Удалить мои</button>
+  </div>
+
+  <button id="playBtn"><span id="playIcon">▶</span><span id="playLabel">Слушать</span></button>
 
   <p id="statusMsg"></p>
 </div>
 
+<script src="data.js"></script>
+<script src="solar.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

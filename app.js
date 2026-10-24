@@ -1,243 +1,456 @@
 (function () {
   // --- Telegram Mini App ---
-  // Если страница открыта внутри Telegram, здесь будет объект WebApp; в обычном браузере — undefined.
-  var tg = window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.initData !== undefined
-    ? window.Telegram.WebApp : null;
+  // Если страница открыта внутри Telegram, tg.initData не пустой; в обычном браузере — пустой.
+  var tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
   var inTelegram = !!(tg && tg.initData);
 
   if (inTelegram) {
     tg.ready();   // сообщаем Telegram, что приложение загрузилось (убирает лоадер)
     tg.expand();  // раскрываем мини-приложение на всю высоту
+    // Чтобы свайп по переключателю не закрывал приложение
+    try { if (tg.isVersionAtLeast('7.7')) tg.disableVerticalSwipes(); } catch (e) {}
+  }
+
+  function haptic(kind) {
     try {
-      tg.setHeaderColor('#0D0F08');
-      tg.setBackgroundColor('#0D0F08');
+      if (!inTelegram || !tg.HapticFeedback) return;
+      if (kind === 'select') tg.HapticFeedback.selectionChanged();
+      else tg.HapticFeedback.impactOccurred(kind || 'light');
     } catch (e) {}
   }
 
-  function haptic(type) {
-    try { if (inTelegram && tg.HapticFeedback) tg.HapticFeedback.impactOccurred(type || 'light'); } catch (e) {}
+  // --- Настройки ---
+  var TIMES = ['morning', 'day', 'night'];
+  var THEME_BG = { morning: '#FBF3E9', day: '#EDF4F7', night: '#0D0F08' };
+  var INPUT_HINT = { morning: 'Своя фраза для утра', day: 'Своя фраза для дня', night: 'Своя фраза для ночи' };
+  var PAUSE_MS = 3200;        // пауза между фразами
+  var MUSIC_VOLUME_DB = -12;  // громкость фоновой музыки (0 — максимум, чем меньше, тем тише)
+
+  function timeByClock() {
+    var h = new Date().getHours();
+    if (h >= 5 && h < 12) return 'morning';
+    if (h >= 12 && h < 18) return 'day';
+    return 'night';
   }
 
-  // --- Хранилище фраз ---
-  // localStorage — память браузера на этом устройстве.
-  // Telegram CloudStorage — облако Telegram, привязано к пользователю: фразы видны на всех его устройствах.
-  var STORAGE_KEY = 'affirmations-list';
-  var cloud = inTelegram && tg.CloudStorage && tg.isVersionAtLeast && tg.isVersionAtLeast('6.9') ? tg.CloudStorage : null;
-
-  var phrases = [];
-  try { var saved = localStorage.getItem(STORAGE_KEY); if (saved) phrases = JSON.parse(saved) || []; } catch (e) {}
-
-  function persist() {
-    var json = JSON.stringify(phrases);
-    try { localStorage.setItem(STORAGE_KEY, json); } catch (e) {}
-    // У CloudStorage лимит 4096 символов на значение
-    if (cloud && json.length <= 4096) { try { cloud.setItem(STORAGE_KEY, json); } catch (e) {} }
-  }
-
-  if (cloud) {
-    try {
-      cloud.getItem(STORAGE_KEY, function (err, value) {
-        if (err || !value) return;
-        try {
-          var list = JSON.parse(value);
-          if (Array.isArray(list)) { phrases = list; render(); }
-        } catch (e) {}
-      });
-    } catch (e) {}
-  }
-
-  var isPlaying = false, currentIndex = null;
-  var voices = [], selectedVoiceURI = '';
+  var state = { time: timeByClock(), isPlaying: false, currentIndex: null };
+  // Номер текущего «сеанса» воспроизведения. Растёт при каждой остановке —
+  // так запоздалые события от прошлого сеанса просто игнорируются.
+  var session = 0;
   var timeoutId = null, startCheckId = null, resumeIntervalId = null;
-  var synth = null, reverb = null, loop = null;
 
   var els = {
-    input: document.getElementById('phraseInput'),
-    addBtn: document.getElementById('addBtn'),
-    emptyHint: document.getElementById('emptyHint'),
+    seg: document.getElementById('seg'),
+    thumb: document.getElementById('segThumb'),
+    segBtns: Array.prototype.slice.call(document.querySelectorAll('.seg-btn')),
+    title: document.getElementById('title'),
+    subtitle: document.getElementById('subtitle'),
     statusDot: document.getElementById('statusDot'),
     statusText: document.getElementById('statusText'),
     countLabel: document.getElementById('countLabel'),
     currentLabel: document.getElementById('currentLabel'),
     listCard: document.getElementById('listCard'),
+    input: document.getElementById('phraseInput'),
+    addBtn: document.getElementById('addBtn'),
+    clearBtn: document.getElementById('clearBtn'),
     playBtn: document.getElementById('playBtn'),
     playIcon: document.getElementById('playIcon'),
     playLabel: document.getElementById('playLabel'),
-    voiceSelect: document.getElementById('voiceSelect'),
-    clearBtn: document.getElementById('clearBtn'),
     statusMsg: document.getElementById('statusMsg'),
   };
 
-  function render() {
-    els.countLabel.textContent = phrases.length;
-    els.currentLabel.textContent = (isPlaying && currentIndex !== null) ? phrases[currentIndex] : '—';
-    els.currentLabel.style.color = isPlaying ? 'var(--accent)' : 'var(--text)';
-    els.emptyHint.style.display = phrases.length === 0 ? 'block' : 'none';
-    els.playBtn.disabled = phrases.length === 0;
-    els.playBtn.classList.toggle('active-ready', phrases.length > 0);
-    els.clearBtn.style.display = phrases.length > 0 ? 'flex' : 'none';
-
-    if (phrases.length === 0) { els.listCard.style.display = 'none'; els.listCard.innerHTML = ''; }
-    else {
-      els.listCard.style.display = 'block';
-      els.listCard.innerHTML = phrases.map(function (p, i) {
-        var live = isPlaying && currentIndex === i;
-        return '<div class="list-row"><span class="text' + (live ? ' live' : '') + '">' + escapeHtml(p) +
-          '</span><button class="remove-btn" data-idx="' + i + '" aria-label="Удалить">×</button></div>';
-      }).join('');
-      Array.prototype.forEach.call(els.listCard.querySelectorAll('.remove-btn'), function (btn) {
-        btn.addEventListener('click', function () {
-          if (isPlaying) stopPlaying();
-          phrases.splice(parseInt(btn.getAttribute('data-idx'), 10), 1);
-          haptic('light');
-          persist(); render();
-        });
-      });
-    }
-
-    els.statusDot.classList.toggle('live', isPlaying);
-    els.statusDot.classList.toggle('dot-live', isPlaying);
-    els.statusText.textContent = isPlaying ? 'Звучит сейчас' : 'Готово к старту';
-  }
-
+  function pad(n) { return (n < 10 ? '0' : '') + n; }
   function escapeHtml(s) {
     var d = document.createElement('div'); d.textContent = s; return d.innerHTML;
+  }
+
+  // --- Свои фразы пользователя ---
+  // Хранятся отдельно для каждого времени суток.
+  // localStorage — память браузера на этом устройстве.
+  // Telegram CloudStorage — облако Telegram: фразы видны на всех устройствах пользователя.
+  var CUSTOM_KEY = 'affirmations-custom';
+  var cloud = inTelegram && tg.CloudStorage && tg.isVersionAtLeast('6.9') ? tg.CloudStorage : null;
+  var custom = { morning: [], day: [], night: [] };
+
+  function parseCustom(json) {
+    try {
+      var o = JSON.parse(json);
+      if (!o || typeof o !== 'object') return;
+      TIMES.forEach(function (t) {
+        if (Array.isArray(o[t])) custom[t] = o[t].filter(function (s) { return typeof s === 'string'; });
+      });
+    } catch (e) {}
+  }
+  try { var saved = localStorage.getItem(CUSTOM_KEY); if (saved) parseCustom(saved); } catch (e) {}
+
+  function persistCustom() {
+    var json = JSON.stringify(custom);
+    try { localStorage.setItem(CUSTOM_KEY, json); } catch (e) {}
+    // У CloudStorage лимит 4096 символов на значение
+    if (cloud && json.length <= 4096) { try { cloud.setItem(CUSTOM_KEY, json); } catch (e) {} }
+  }
+
+  if (cloud) {
+    try {
+      cloud.getItem(CUSTOM_KEY, function (err, value) {
+        if (err || !value || state.isPlaying) return;
+        parseCustom(value);
+        renderSet(); renderPlayback();
+      });
+    } catch (e) {}
+  }
+
+  // Плейлист текущего времени суток: сначала готовые фразы (с mp3), потом свои (голос устройства)
+  function playlist() {
+    var t = state.time;
+    return AFFIRMATIONS[t].phrases.map(function (p, i) {
+      return { text: p, src: voicePath(t, i), custom: false };
+    }).concat(custom[t].map(function (p, i) {
+      return { text: p, src: null, custom: true, ci: i };
+    }));
   }
 
   function addPhrase() {
     var v = els.input.value.trim();
     if (!v) return;
-    phrases.push(v); els.input.value = ''; haptic('medium'); persist(); render();
+    custom[state.time].push(v);
+    els.input.value = '';
+    haptic('medium');
+    persistCustom(); renderSet(); renderPlayback();
   }
   els.addBtn.addEventListener('click', addPhrase);
   els.input.addEventListener('keydown', function (e) { if (e.key === 'Enter') addPhrase(); });
+
   els.clearBtn.addEventListener('click', function () {
-    if (isPlaying) stopPlaying();
-    phrases = []; persist(); render();
+    if (state.isPlaying) stopPlaying();
+    custom[state.time] = [];
+    persistCustom(); renderSet(); renderPlayback();
   });
 
-  // --- Голос (встроенный синтез речи устройства) ---
-  var femalePattern = /female|женск|milena|elena|katya|irina|tatyana|olga|anna|alyona/i;
-  function pickDefault(list) {
-    var ru = list.filter(function (v) { return v.lang && v.lang.toLowerCase().indexOf('ru') === 0; });
-    var pool = ru.length > 0 ? ru : list;
-    var female = pool.filter(function (v) { return femalePattern.test(v.name); })[0];
-    return (female || pool[0] || {}).voiceURI || '';
+  // --- Отрисовка ---
+  function renderSet() {
+    var set = AFFIRMATIONS[state.time];
+    var items = playlist();
+    els.title.textContent = set.title;
+    els.subtitle.textContent = set.subtitle;
+    els.countLabel.textContent = items.length;
+    els.input.placeholder = INPUT_HINT[state.time];
+    els.clearBtn.hidden = custom[state.time].length === 0;
+    els.listCard.innerHTML = items.map(function (item, i) {
+      return '<div class="list-row" role="button" tabindex="0" data-idx="' + i + '">' +
+        '<span class="num">' + pad(i + 1) + '</span>' +
+        '<span class="text">' + escapeHtml(item.text) + (item.custom ? '<span class="tag">моя</span>' : '') + '</span>' +
+        (item.custom ? '<button class="remove-btn" data-ci="' + item.ci + '" aria-label="Удалить фразу">×</button>' : '') +
+        '</div>';
+    }).join('');
+    els.segBtns.forEach(function (b) {
+      b.setAttribute('aria-selected', b.getAttribute('data-time') === state.time ? 'true' : 'false');
+    });
   }
-  function loadVoices() {
-    var list = window.speechSynthesis ? window.speechSynthesis.getVoices() : [];
-    if (list.length > 0) {
-      voices = list;
-      if (!selectedVoiceURI) selectedVoiceURI = pickDefault(list);
-      if (voices.length > 1) {
-        els.voiceSelect.style.display = 'block';
-        els.voiceSelect.innerHTML = voices.map(function (v) {
-          return '<option value="' + escapeHtml(v.voiceURI) + '"' + (v.voiceURI === selectedVoiceURI ? ' selected' : '') + '>' +
-            escapeHtml(v.name) + ' (' + v.lang + ')</option>';
-        }).join('');
-      }
+
+  function renderPlayback() {
+    var items = playlist();
+    var live = state.isPlaying && state.currentIndex !== null && items[state.currentIndex];
+    els.currentLabel.textContent = live ? items[state.currentIndex].text : '—';
+    els.currentLabel.classList.toggle('live', !!live);
+    Array.prototype.forEach.call(els.listCard.children, function (row, i) {
+      row.classList.toggle('live', !!live && i === state.currentIndex);
+    });
+    els.statusDot.classList.toggle('live', state.isPlaying);
+    els.statusDot.classList.toggle('dot-live', state.isPlaying);
+    els.statusText.textContent = state.isPlaying ? 'Звучит сейчас' : 'Готово к старту';
+    els.playIcon.textContent = state.isPlaying ? '❚❚' : '▶';
+    els.playLabel.textContent = state.isPlaying ? 'Остановить' : 'Слушать';
+    if (window.SolarSystem) SolarSystem.setPlaying(state.isPlaying);
+  }
+
+  // Нажатие на фразу — играть с неё; на крестик — удалить свою фразу
+  els.listCard.addEventListener('click', function (e) {
+    var remove = e.target.closest('.remove-btn');
+    if (remove) {
+      if (state.isPlaying) stopPlaying();
+      custom[state.time].splice(parseInt(remove.getAttribute('data-ci'), 10), 1);
+      haptic('light');
+      persistCustom(); renderSet(); renderPlayback();
+      return;
+    }
+    var row = e.target.closest('.list-row');
+    if (!row) return;
+    if (state.isPlaying) stopPlaying();
+    startPlaying(parseInt(row.getAttribute('data-idx'), 10));
+  });
+  els.listCard.addEventListener('keydown', function (e) {
+    if ((e.key === 'Enter' || e.key === ' ') && e.target.classList.contains('list-row')) {
+      e.preventDefault();
+      e.target.click();
+    }
+  });
+
+  // --- Время суток и тема ---
+  function applyTheme(instant) {
+    document.documentElement.setAttribute('data-time', state.time);
+    if (window.SolarSystem) SolarSystem.setMode(state.time, instant);
+    if (inTelegram) {
+      try { tg.setHeaderColor(THEME_BG[state.time]); tg.setBackgroundColor(THEME_BG[state.time]); } catch (e) {}
     }
   }
-  els.voiceSelect.addEventListener('change', function () { selectedVoiceURI = els.voiceSelect.value; });
+
+  function selectTime(time) {
+    if (time === state.time) { placeThumb(); return; }
+    if (state.isPlaying) stopPlaying();
+    state.time = time;
+    haptic('select');
+    placeThumb(true);
+    applyTheme(false);
+    renderSet();
+    renderPlayback();
+  }
+
+  // --- Ползунок переключателя ---
+  function placeThumb(animate) {
+    els.thumb.style.transform = 'translateX(' + (TIMES.indexOf(state.time) * 100) + '%)';
+    if (animate) {
+      els.thumb.classList.remove('stretch');
+      void els.thumb.offsetWidth; // перезапуск анимации
+      els.thumb.classList.add('stretch');
+    }
+  }
+
+  els.segBtns.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      if (suppressClick) return;
+      selectTime(btn.getAttribute('data-time'));
+    });
+  });
+
+  // Стрелки на клавиатуре
+  els.seg.addEventListener('keydown', function (e) {
+    var i = TIMES.indexOf(state.time);
+    if (e.key === 'ArrowRight' && i < TIMES.length - 1) selectTime(TIMES[i + 1]);
+    else if (e.key === 'ArrowLeft' && i > 0) selectTime(TIMES[i - 1]);
+    else return;
+    els.segBtns[TIMES.indexOf(state.time)].focus();
+    e.preventDefault();
+  });
+
+  // Перетаскивание ползунка пальцем
+  var drag = null, suppressClick = false;
+  els.seg.addEventListener('pointerdown', function (e) {
+    if (e.button !== 0) return;
+    drag = { startX: e.clientX, id: e.pointerId, active: false, x: 0, w: 0 };
+  });
+  els.seg.addEventListener('pointermove', function (e) {
+    if (!drag || e.pointerId !== drag.id) return;
+    if (!drag.active) {
+      if (Math.abs(e.clientX - drag.startX) < 6) return;
+      drag.active = true;
+      els.seg.setPointerCapture(drag.id);
+      els.seg.classList.add('dragging');
+    }
+    var r = els.seg.getBoundingClientRect();
+    var w = els.thumb.offsetWidth;
+    var x = e.clientX - r.left - 6 - w / 2;
+    x = Math.max(0, Math.min(x, w * (TIMES.length - 1)));
+    els.thumb.style.transform = 'translateX(' + x + 'px)';
+    drag.x = x; drag.w = w;
+  });
+  function endDrag() {
+    if (!drag) return;
+    if (drag.active) {
+      els.seg.classList.remove('dragging');
+      suppressClick = true;
+      setTimeout(function () { suppressClick = false; }, 0);
+      selectTime(TIMES[Math.round(drag.x / drag.w)]);
+    }
+    drag = null;
+  }
+  els.seg.addEventListener('pointerup', endDrag);
+  els.seg.addEventListener('pointercancel', endDrag);
+
+  // --- Голос устройства (для своих фраз и пока нет mp3) ---
+  var voices = [];
+  var femalePattern = /female|женск|milena|elena|katya|irina|tatyana|olga|anna|alyona/i;
+  function loadVoices() {
+    if (window.speechSynthesis) voices = window.speechSynthesis.getVoices();
+  }
+  function pickVoice() {
+    var ru = voices.filter(function (v) { return v.lang && v.lang.toLowerCase().indexOf('ru') === 0; });
+    return ru.filter(function (v) { return femalePattern.test(v.name); })[0] || ru[0] || null;
+  }
   if (window.speechSynthesis) {
     loadVoices();
     window.speechSynthesis.addEventListener('voiceschanged', loadVoices);
-  } else {
-    els.statusMsg.textContent = 'Синтез речи не поддерживается на этом устройстве.';
   }
 
-  // --- Фоновая музыка ---
-  function setupMusic() {
-    if (synth) return;
-    reverb = new Tone.Reverb({ decay: 9, wet: 0.55 }).toDestination();
-    synth = new Tone.PolySynth(Tone.Synth, {
-      oscillator: { type: 'sine' },
-      envelope: { attack: 2.5, decay: 1, sustain: 0.8, release: 5 },
-      volume: -20,
-    }).connect(reverb);
-    var chords = [['A3','C4','E4'],['F3','A3','C4'],['C4','E4','G4'],['G3','C4','E4']];
-    var step = 0;
-    loop = new Tone.Loop(function (time) {
-      synth.triggerAttackRelease(chords[step % chords.length], '6n', time);
-      step += 1;
-    }, '6s');
-  }
-
-  // --- Воспроизведение ---
-  function speakNext(index) {
-    if (!isPlaying || phrases.length === 0) return;
-    if (!window.speechSynthesis) return;
-    currentIndex = index; render();
-    var utterance = new SpeechSynthesisUtterance(phrases[index]);
-    var voice = voices.filter(function (v) { return v.voiceURI === selectedVoiceURI; })[0];
-    if (voice) { utterance.voice = voice; utterance.lang = voice.lang; } else { utterance.lang = 'ru-RU'; }
-    utterance.rate = 0.88; utterance.pitch = 1.05;
+  function speakWithDevice(text, onDone, my) {
+    if (!window.speechSynthesis) {
+      stopPlaying();
+      els.statusMsg.textContent = 'Голос устройства недоступен, а озвучка этой фразы ещё не загружена.';
+      return;
+    }
+    var u = new SpeechSynthesisUtterance(text);
+    var voice = pickVoice();
+    if (voice) { u.voice = voice; u.lang = voice.lang; } else { u.lang = 'ru-RU'; }
+    u.rate = 0.88; u.pitch = 1.05;
     var started = false;
-    utterance.onstart = function () { started = true; els.statusMsg.textContent = ''; };
-    utterance.onerror = function (e) {
-      if (e && (e.error === 'interrupted' || e.error === 'canceled')) return;
+    u.onstart = function () { started = true; };
+    u.onend = function () { if (my === session) onDone(); };
+    u.onerror = function (e) {
+      if (my !== session || (e && (e.error === 'interrupted' || e.error === 'canceled'))) return;
       stopPlaying();
       els.statusMsg.textContent = 'Не удалось воспроизвести голос. Попробуйте ещё раз.';
     };
-    utterance.onend = function () {
-      if (!isPlaying) return;
-      timeoutId = setTimeout(function () { if (isPlaying) speakNext((index + 1) % phrases.length); }, 3200);
-    };
     if (startCheckId) clearTimeout(startCheckId);
     startCheckId = setTimeout(function () {
-      if (!started && isPlaying) {
+      if (!started && my === session) {
         stopPlaying();
         els.statusMsg.textContent = 'Устройство не начало озвучку. Проверьте звук и попробуйте снова.';
       }
     }, 2000);
     window.speechSynthesis.cancel();
-    window.speechSynthesis.speak(utterance);
+    window.speechSynthesis.speak(u);
   }
 
-  function startPlaying() {
-    if (phrases.length === 0) return;
+  // --- Голос из mp3 ---
+  // Один и тот же <audio> используется для всех фраз: на iPhone он «разблокируется»
+  // первым нажатием на «Слушать», и дальше фразы могут играть сами.
+  var voiceEl = new Audio();
+  voiceEl.preload = 'auto';
+  var missing = {}; // файлы, которых нет — чтобы не запрашивать их повторно
+
+  function voicePath(time, i) { return 'audio/' + time + '/' + pad(i + 1) + '.mp3'; }
+
+  function playPhrase(i) {
+    if (!state.isPlaying) return;
+    var items = playlist();
+    if (!items.length) { stopPlaying(); return; }
+    i = i % items.length;
+    var item = items[i];
+    var my = session;
+    state.currentIndex = i;
+    renderPlayback();
+
+    var next = function () {
+      timeoutId = setTimeout(function () {
+        if (my === session) playPhrase(i + 1);
+      }, PAUSE_MS);
+    };
+    if (!item.src || missing[item.src]) { speakWithDevice(item.text, next, my); return; }
+
+    var fellBack = false;
+    var fallback = function () {
+      if (fellBack || my !== session) return;
+      fellBack = true;
+      missing[item.src] = true;
+      speakWithDevice(item.text, next, my);
+    };
+    voiceEl.onended = function () { if (my === session) next(); };
+    voiceEl.onerror = fallback;
+    voiceEl.src = item.src;
+    var p = voiceEl.play();
+    if (p && p.catch) p.catch(function (err) {
+      if (my !== session) return;
+      if (err && err.name === 'NotAllowedError') {
+        stopPlaying();
+        els.statusMsg.textContent = 'Браузер заблокировал звук. Нажмите «Слушать» ещё раз.';
+      } else if (err && err.name !== 'AbortError') {
+        fallback();
+      }
+    });
+  }
+
+  // --- Фоновая музыка ---
+  // Если есть файл audio/music/<время>.mp3 — играет он, по кругу.
+  // Если нет — включается мягкий синтезатор из прототипа.
+  var musicPlayers = {};
+  var synth = null, reverb = null, loop = null;
+
+  function startMusic(my) {
+    var time = state.time;
+    var url = 'audio/music/' + time + '.mp3';
+    if (missing[url]) { startSynth(); return; }
+    var player = musicPlayers[time];
+    if (player && player.loaded) { player.start(); return; }
+    if (!player) {
+      player = musicPlayers[time] = new Tone.Player({ loop: true, fadeIn: 2.5, fadeOut: 1.5, volume: MUSIC_VOLUME_DB }).toDestination();
+    }
+    player.load(url).then(function () {
+      if (my === session && player.state !== 'started') player.start();
+    }).catch(function () {
+      missing[url] = true;
+      player.dispose(); delete musicPlayers[time];
+      if (my === session) startSynth();
+    });
+  }
+
+  function startSynth() {
+    if (!synth) {
+      reverb = new Tone.Reverb({ decay: 9, wet: 0.55 }).toDestination();
+      synth = new Tone.PolySynth(Tone.Synth, {
+        oscillator: { type: 'sine' },
+        envelope: { attack: 2.5, decay: 1, sustain: 0.8, release: 5 },
+        volume: -20,
+      }).connect(reverb);
+      var chords = [['A3','C4','E4'],['F3','A3','C4'],['C4','E4','G4'],['G3','C4','E4']];
+      var step = 0;
+      loop = new Tone.Loop(function (t) {
+        synth.triggerAttackRelease(chords[step % chords.length], '6n', t);
+        step += 1;
+      }, '6s');
+    }
+    if (loop.state === 'started') return;
+    Tone.Transport.bpm.value = 60;
+    loop.start(0);
+    Tone.Transport.start();
+  }
+
+  function stopMusic() {
+    Object.keys(musicPlayers).forEach(function (k) {
+      var p = musicPlayers[k];
+      if (p.state === 'started') p.stop();
+    });
+    if (loop) loop.stop(0);
+    Tone.Transport.stop();
+  }
+
+  // --- Старт / стоп ---
+  function startPlaying(fromIndex) {
     els.statusMsg.textContent = '';
-    isPlaying = true;
+    state.isPlaying = true;
+    var my = session;
     haptic('medium');
-    els.playIcon.textContent = '❚❚'; els.playLabel.textContent = 'Остановить';
-    render();
-    speakNext(0);
+    renderPlayback();
+    playPhrase(fromIndex || 0);
+
+    // Chrome иногда «засыпает» посреди долгой озвучки — будим
     resumeIntervalId = setInterval(function () {
       if (window.speechSynthesis && window.speechSynthesis.speaking) window.speechSynthesis.resume();
     }, 6000);
 
     Tone.start().then(function () {
-      if (Tone.context.state !== 'running') return Tone.context.resume();
-    }).then(function () {
-      if (!isPlaying) return;
-      setupMusic();
-      Tone.Transport.bpm.value = 60;
-      loop.start(0);
-      Tone.Transport.start();
+      if (my === session) startMusic(my);
     }).catch(function () {});
-
-    setTimeout(function () {
-      if (!isPlaying) return;
-      var speaking = window.speechSynthesis && window.speechSynthesis.speaking;
-      if (!speaking && Tone.context.state !== 'running') {
-        els.statusMsg.textContent = 'Звук не запускается. Проверьте громкость и беззвучный режим устройства.';
-      }
-    }, 2500);
   }
 
   function stopPlaying() {
-    isPlaying = false; currentIndex = null;
-    els.playIcon.textContent = '▶'; els.playLabel.textContent = 'Слушать';
+    session += 1;
+    state.isPlaying = false; state.currentIndex = null;
+    voiceEl.pause();
     if (window.speechSynthesis) window.speechSynthesis.cancel();
     if (timeoutId) clearTimeout(timeoutId);
     if (startCheckId) clearTimeout(startCheckId);
     if (resumeIntervalId) clearInterval(resumeIntervalId);
-    if (loop) loop.stop(0);
-    Tone.Transport.stop();
-    render();
+    stopMusic();
+    renderPlayback();
   }
 
-  els.playBtn.addEventListener('click', function () { isPlaying ? stopPlaying() : startPlaying(); });
+  els.playBtn.addEventListener('click', function () {
+    if (state.isPlaying) stopPlaying(); else startPlaying(0);
+  });
 
-  render();
+  // --- Первый запуск ---
+  applyTheme(true);
+  placeThumb(false);
+  renderSet();
+  renderPlayback();
 })();

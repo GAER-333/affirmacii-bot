@@ -56,6 +56,8 @@
     progressFill: document.getElementById('progressFill'),
     currentLabel: document.getElementById('currentLabel'),
     musicVolume: document.getElementById('musicVolume'),
+    voiceVolume: document.getElementById('voiceVolume'),
+    speedChips: document.getElementById('speedChips'),
     sleepChips: document.getElementById('sleepChips'),
     sleepLeft: document.getElementById('sleepLeft'),
     listCard: document.getElementById('listCard'),
@@ -317,7 +319,7 @@
     var u = new SpeechSynthesisUtterance(text);
     var voice = pickVoice();
     if (voice) { u.voice = voice; u.lang = voice.lang; } else { u.lang = 'ru-RU'; }
-    u.rate = 0.88; u.pitch = 1.05;
+    u.rate = 0.88 * voiceRate; u.pitch = 1.05; u.volume = voiceGain();
     var started = false;
     u.onstart = function () { started = true; };
     u.onend = function () { if (my === session) onDone(); };
@@ -352,15 +354,129 @@
     timeoutId = startCheckId = null;
   }
 
-  // Что делать, когда фраза дозвучала: выдержать паузу и перейти к следующей
+  // Что делать, когда фраза дозвучала: выдержать паузу и перейти к следующей.
+  // При медленном темпе пауза между фразами тоже чуть длиннее.
   function afterPhrase(i, my) {
     return function () {
       if (my !== session) return;
       state.phase = 'gap';
       timeoutId = setTimeout(function () {
         if (my === session) playPhrase(i + 1);
-      }, PAUSE_MS);
+      }, PAUSE_MS / voiceRate);
     };
+  }
+
+  // --- Темп речи ---
+  // Замедление всей записи звучит как «слоумо», поэтому делаем иначе: находим паузы
+  // между словами (где голос затихает) и удлиняем только их. Слова звучат с обычной скоростью.
+  // При ускорении — наоборот, паузы укорачиваются.
+  var decodedVoice = {}; // src → Promise с раскодированным звуком
+  var pacedVoice = {};   // src|темп → Promise с адресом готового файла
+
+  function decodeVoice(src) {
+    if (!decodedVoice[src]) {
+      decodedVoice[src] = fetch(src).then(function (r) {
+        if (!r.ok) throw new Error('нет файла');
+        return r.arrayBuffer();
+      }).then(function (data) { return Tone.getContext().rawContext.decodeAudioData(data); });
+    }
+    return decodedVoice[src];
+  }
+
+  function pacedVoiceUrl(src, rate) {
+    var key = src + '|' + rate;
+    if (!pacedVoice[key]) {
+      pacedVoice[key] = decodeVoice(src).then(function (buf) {
+        return URL.createObjectURL(encodeWav(stretchPauses(buf, rate)));
+      });
+    }
+    return pacedVoice[key];
+  }
+
+  function stretchPauses(buf, rate) {
+    var sr = buf.sampleRate, n = buf.length, data = buf.getChannelData(0);
+    // Громкость окнами по 10 мс
+    var frame = Math.round(sr * 0.01), frames = Math.floor(n / frame);
+    var level = new Float32Array(frames), peak = 0;
+    for (var f = 0; f < frames; f++) {
+      var s = 0;
+      for (var k = f * frame; k < (f + 1) * frame; k++) s += data[k] * data[k];
+      level[f] = Math.sqrt(s / frame);
+      if (level[f] > peak) peak = level[f];
+    }
+    var quiet = peak * 0.06; // тише этого — уже не речь, а пауза
+    var first = 0; while (first < frames && level[first] < quiet) first++;
+    var last = frames - 1; while (last > first && level[last] < quiet) last--;
+
+    // Паузы внутри фразы: от 70 мс тишины подряд. Короче — это обычно не пауза, а смычка
+    // на «т», «п», «к»; если её растянуть, слово прозвучит с запинкой.
+    // Тишину вставляем в самую тихую точку паузы.
+    var gaps = [];
+    for (var g = first; g <= last; g++) {
+      if (level[g] >= quiet) continue;
+      var from = g, quietest = g;
+      while (g <= last && level[g] < quiet) { if (level[g] < level[quietest]) quietest = g; g++; }
+      if (g - from >= 7) gaps.push({ at: quietest * frame + (frame >> 1), len: (g - from) * frame });
+    }
+    if (!gaps.length) return buf;
+
+    // Сколько тишины добавить (минус — убрать), делим между паузами пропорционально их длине
+    var gapTotal = 0; gaps.forEach(function (p) { gapTotal += p.len; });
+    var change = (last - first) * frame * (1 / rate - 1);
+    var total = n;
+    gaps.forEach(function (p) {
+      p.delta = Math.round(Math.max(-p.len * 0.5, Math.min(sr * 0.6, change * p.len / gapTotal)));
+      total += p.delta;
+    });
+
+    var out = Tone.getContext().rawContext.createBuffer(buf.numberOfChannels, total, sr);
+    for (var c = 0; c < buf.numberOfChannels; c++) {
+      var src = buf.getChannelData(c), dst = out.getChannelData(c), r = 0, w = 0;
+      gaps.forEach(function (p) {
+        var cut = p.delta < 0 ? -p.delta : 0;
+        var end = p.at - (cut >> 1);
+        dst.set(src.subarray(r, end), w);
+        w += end - r;
+        r = end + cut;
+        if (p.delta > 0) w += p.delta; // вставленная тишина — в новом буфере там уже нули
+      });
+      dst.set(src.subarray(r), w);
+    }
+    return out;
+  }
+
+  // Звук → файл WAV (16 бит), который можно отдать обычному плееру <audio>
+  function encodeWav(buf) {
+    var ch = buf.numberOfChannels, sr = buf.sampleRate, n = buf.length;
+    var view = new DataView(new ArrayBuffer(44 + n * ch * 2));
+    var text = function (o, s) { for (var i = 0; i < s.length; i++) view.setUint8(o + i, s.charCodeAt(i)); };
+    text(0, 'RIFF'); view.setUint32(4, 36 + n * ch * 2, true); text(8, 'WAVE');
+    text(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, ch, true);
+    view.setUint32(24, sr, true); view.setUint32(28, sr * ch * 2, true); view.setUint16(32, ch * 2, true); view.setUint16(34, 16, true);
+    text(36, 'data'); view.setUint32(40, n * ch * 2, true);
+    var chans = [];
+    for (var c = 0; c < ch; c++) chans.push(buf.getChannelData(c));
+    for (var i = 0, o = 44; i < n; i++) {
+      for (c = 0; c < ch; c++, o += 2) {
+        var v = Math.max(-1, Math.min(1, chans[c][i]));
+        view.setInt16(o, v < 0 ? v * 0x8000 : v * 0x7fff, true);
+      }
+    }
+    return new Blob([view], { type: 'audio/wav' });
+  }
+
+  // iPhone разрешает плееру звучать, только если первый play() был прямо из нажатия.
+  // Обработка темпа занимает доли секунды, поэтому «разблокируем» плеер коротким кусочком тишины.
+  var voiceUnlocked = false;
+  function unlockVoice() {
+    if (voiceUnlocked) return;
+    voiceUnlocked = true;
+    try {
+      var silence = Tone.getContext().rawContext.createBuffer(1, 2205, 44100);
+      voiceEl.src = URL.createObjectURL(encodeWav(silence));
+      var p = voiceEl.play();
+      if (p && p.catch) p.catch(function () {});
+    } catch (e) {}
   }
 
   function playPhrase(i) {
@@ -388,19 +504,29 @@
       missing[item.src] = true;
       speakWithDevice(item.text, done, my);
     };
-    voiceEl.onended = done;
-    voiceEl.onerror = fallback;
-    voiceEl.src = item.src;
-    var p = voiceEl.play();
-    if (p && p.catch) p.catch(function (err) {
+    var start = function (url) {
       if (my !== session) return;
-      if (err && err.name === 'NotAllowedError') {
-        pausePlayback();
-        els.statusMsg.textContent = 'Браузер заблокировал звук. Нажмите «Продолжить».';
-      } else if (err && err.name !== 'AbortError') {
-        fallback();
-      }
-    });
+      voiceEl.onended = done;
+      voiceEl.onerror = fallback;
+      voiceEl.src = url;
+      var p = voiceEl.play();
+      if (p && p.catch) p.catch(function (err) {
+        if (my !== session) return;
+        if (err && err.name === 'NotAllowedError') {
+          pausePlayback();
+          els.statusMsg.textContent = 'Браузер заблокировал звук. Нажмите «Продолжить».';
+        } else if (err && err.name !== 'AbortError') {
+          fallback();
+        }
+      });
+    };
+    var rate = voiceRate;
+    if (rate === 1) { start(item.src); return; }
+    // Если обработать не вышло — играем исходный файл (а если его нет, сработает голос устройства)
+    pacedVoiceUrl(item.src, rate).then(start, function () { start(item.src); });
+    // Заранее готовим следующую фразу, чтобы переход был без задержки
+    var next = items[(i + 1) % items.length];
+    if (next.src && !missing[next.src]) pacedVoiceUrl(next.src, rate).catch(function () {});
   }
 
   // --- Фоновая музыка ---
@@ -513,19 +639,68 @@
       if (v > 0) Tone.Destination.volume.rampTo(Tone.gainToDb(Math.pow(v / 100, 2) * 2.5), 0.15);
     } catch (e) {}
   }
-  var savedVolume = parseInt(loadPref('affirmations-music-volume', '50'), 10);
-  els.musicVolume.value = isNaN(savedVolume) ? 50 : savedVolume;
-  applyMusicVolume(parseInt(els.musicVolume.value, 10));
-  els.musicVolume.addEventListener('input', function () {
-    var v = parseInt(els.musicVolume.value, 10);
-    applyMusicVolume(v);
-    savePref('affirmations-music-volume', v);
+
+  // Громкость голоса. На iPhone у <audio> громкость менять нельзя, поэтому голос из mp3
+  // пропускаем через свой регулятор Web Audio — мимо регулятора музыки.
+  var voiceGainNode = null;
+  function voiceGain() { return Math.pow(parseInt(els.voiceVolume.value, 10) / 100, 2); }
+  function connectVoice() {
+    if (voiceGainNode) return;
+    try {
+      var raw = Tone.getContext().rawContext;
+      voiceGainNode = raw.createGain();
+      voiceGainNode.gain.value = voiceGain();
+      raw.createMediaElementSource(voiceEl).connect(voiceGainNode);
+      voiceGainNode.connect(raw.destination);
+      voiceEl.volume = 1; // теперь громкостью управляет регулятор — иначе она применится дважды
+    } catch (e) { voiceGainNode = null; }
+  }
+  function applyVoiceVolume(v) {
+    els.voiceVolume.style.setProperty('--fill', v + '%');
+    var g = Math.pow(v / 100, 2);
+    if (voiceGainNode) voiceGainNode.gain.setTargetAtTime(g, voiceGainNode.context.currentTime, 0.05);
+    else voiceEl.volume = g; // запасной путь (работает везде, кроме iPhone)
+    // Голос устройства меняет громкость только со следующей фразы
+  }
+
+  // Подключаем ползунок: восстанавливаем сохранённое значение и запоминаем новое
+  function bindSlider(input, key, fallback, apply) {
+    var saved = parseInt(loadPref(key, String(fallback)), 10);
+    input.value = isNaN(saved) ? fallback : saved;
+    apply(parseInt(input.value, 10));
+    input.addEventListener('input', function () {
+      var v = parseInt(input.value, 10);
+      apply(v);
+      savePref(key, v);
+    });
+  }
+  bindSlider(els.musicVolume, 'affirmations-music-volume', 50, applyMusicVolume);
+  bindSlider(els.voiceVolume, 'affirmations-voice-volume', 100, applyVoiceVolume);
+
+  // Темп речи: 0.8× … 1.1×. Для mp3 меняются паузы между словами (см. «Темп речи» выше),
+  // голос устройства просто говорит медленнее или быстрее. Применяется со следующей фразы.
+  var voiceRate = parseFloat(loadPref('affirmations-voice-rate', '1')) || 1;
+  function applyVoiceRate() {
+    Array.prototype.forEach.call(els.speedChips.children, function (b) {
+      b.setAttribute('aria-pressed', parseFloat(b.getAttribute('data-rate')) === voiceRate ? 'true' : 'false');
+    });
+  }
+  applyVoiceRate();
+  els.speedChips.addEventListener('click', function (e) {
+    var b = e.target.closest('button');
+    if (!b) return;
+    voiceRate = parseFloat(b.getAttribute('data-rate'));
+    savePref('affirmations-voice-rate', voiceRate);
+    haptic('select');
+    applyVoiceRate();
   });
 
   // --- Управление воспроизведением ---
   function startAudioEngine() {
     // Tone.start() должен вызываться прямо из нажатия — иначе браузер не даст включить звук
     Tone.start().then(startMusic).catch(function () {});
+    connectVoice();
+    unlockVoice();
     if (!resumeIntervalId) {
       // Chrome иногда «засыпает» посреди долгой озвучки — будим
       resumeIntervalId = setInterval(function () {

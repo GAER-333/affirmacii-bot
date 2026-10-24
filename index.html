@@ -60,10 +60,26 @@
   <!-- Настройки звучания -->
   <div class="card">
     <div class="card-row">
+      <label class="muted-label" for="voiceVolume">Голос</label>
+      <div class="volume">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3zM5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+        <input type="range" id="voiceVolume" min="0" max="100" step="1" value="100" aria-label="Громкость голоса">
+      </div>
+    </div>
+    <div class="card-row">
       <label class="muted-label" for="musicVolume">Музыка</label>
       <div class="volume">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18V6l11-2v12M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0zM20 16a3 3 0 1 1-6 0 3 3 0 0 1 6 0z"/></svg>
         <input type="range" id="musicVolume" min="0" max="100" step="1" value="50" aria-label="Громкость музыки">
+      </div>
+    </div>
+    <div class="card-row sleep-row">
+      <span class="muted-label">Темп речи</span>
+      <div class="chips" id="speedChips" role="group" aria-label="Темп речи">
+        <button data-rate="0.8" aria-pressed="false">0.8×</button>
+        <button data-rate="0.9" aria-pressed="false">0.9×</button>
+        <button data-rate="1" aria-pressed="true">1×</button>
+        <button data-rate="1.1" aria-pressed="false">1.1×</button>
       </div>
     </div>
     <div class="card-row sleep-row">

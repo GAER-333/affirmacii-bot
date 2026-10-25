@@ -1,8 +1,9 @@
 ﻿<#
-  Озвучка готовых фраз через ElevenLabs.
+  Озвучка готовых фраз через ElevenLabs (по API).
 
   Берёт фразы из data.js, отправляет их в ElevenLabs и сохраняет mp3
-  в audio/<время>/NN.mp3 — ровно туда, где их ищет приложение.
+  в audio/<голос>/<время>/NN.mp3 — ровно туда, где их ищет приложение.
+  Голос (female / male) задаётся параметром -Voice, ID голоса — в .env (VOICE_ID).
   Уже озвученные файлы пропускает (чтобы не платить дважды).
 
   Настройки (ключ, голос) — в файле .env в корне проекта. Образец — .env.example.
@@ -21,7 +22,8 @@ param(
   [ValidateSet('all', 'morning', 'day', 'night')] [string]$Time = 'all',
   [string]$Only,     # номера фраз через запятую (с 1), если нужно не всё: -Only 3,5
   [switch]$Force,    # озвучить заново, даже если файл уже есть
-  [switch]$DryRun    # только показать список, без запросов к ElevenLabs
+  [switch]$DryRun,   # только показать список, без запросов к ElevenLabs
+  [ValidateSet('female', 'male')] [string]$Voice = 'female'  # в какую папку класть: женский или мужской голос
 )
 $ErrorActionPreference = 'Stop'
 $onlyNums = @(); if ($Only) { $onlyNums = @($Only -split '[,\s]+' | Where-Object { $_ } | ForEach-Object { [int]$_ }) }
@@ -57,14 +59,14 @@ $times = if ($Time -eq 'all') { @('morning', 'day', 'night') } else { @($Time) }
 $todo = @()
 $skipped = 0
 foreach ($t in $times) {
-  $voice = Setting ('VOICE_ID_' + $t.ToUpper()) (Setting 'VOICE_ID' '')
+  $voiceId = Setting ('VOICE_ID_' + $t.ToUpper()) (Setting 'VOICE_ID' '')
   $list = $sets[$t]
   for ($i = 0; $i -lt $list.Count; $i++) {
     $n = $i + 1
     if ($onlyNums.Count -and ($onlyNums -notcontains $n)) { continue }
-    $file = Join-Path $root ('audio\{0}\{1:D2}.mp3' -f $t, $n)
+    $file = Join-Path $root ('audio\{0}\{1}\{2:D2}.mp3' -f $Voice, $t, $n)
     if ((Test-Path $file) -and -not $Force) { $skipped++; continue }
-    $todo += [pscustomobject]@{ Time = $t; N = $n; Text = $list[$i]; File = $file; Voice = $voice }
+    $todo += [pscustomobject]@{ Time = $t; N = $n; Text = $list[$i]; File = $file; Voice = $voiceId }
   }
 }
 
@@ -73,7 +75,7 @@ $todo | ForEach-Object { $chars += $_.Text.Length }
 Write-Host ("Фраз к озвучке: {0} ({1} символов). Уже есть и пропущено: {2}." -f $todo.Count, $chars, $skipped)
 
 if ($DryRun) {
-  $todo | ForEach-Object { Write-Host ('  {0}/{1:D2}.mp3  {2}' -f $_.Time, $_.N, $_.Text) }
+  $todo | ForEach-Object { Write-Host ('  {0}/{1}/{2:D2}.mp3  {3}' -f $Voice, $_.Time, $_.N, $_.Text) }
   Write-Host 'Это была проверка (-DryRun): в ElevenLabs ничего не отправлено.'
   exit 0
 }

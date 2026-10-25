@@ -58,6 +58,7 @@
     musicVolume: document.getElementById('musicVolume'),
     voiceVolume: document.getElementById('voiceVolume'),
     speedChips: document.getElementById('speedChips'),
+    genderChips: document.getElementById('genderChips'),
     sleepChips: document.getElementById('sleepChips'),
     sleepLeft: document.getElementById('sleepLeft'),
     listCard: document.getElementById('listCard'),
@@ -117,13 +118,15 @@
     } catch (e) {}
   }
 
-  // Плейлист текущего времени суток: сначала готовые фразы (с mp3), потом свои (голос устройства)
+  // Плейлист текущего времени суток: сначала готовые фразы (с mp3), потом свои (голос устройства).
+  // srcs — файлы озвучки по порядку предпочтения: сначала выбранный голос, потом другой.
   function playlist() {
     var t = state.time;
+    var order = [voiceGender].concat(VOICES.filter(function (v) { return v !== voiceGender; }));
     return AFFIRMATIONS[t].phrases.map(function (p, i) {
-      return { text: p, src: voicePath(t, i), custom: false };
+      return { text: p, srcs: order.map(function (g) { return voicePath(g, t, i); }), custom: false };
     }).concat(custom[t].map(function (p, i) {
-      return { text: p, src: null, custom: true, ci: i };
+      return { text: p, srcs: [], custom: true, ci: i };
     }));
   }
 
@@ -346,7 +349,11 @@
   voiceEl.preload = 'auto';
   var missing = {}; // файлы, которых нет — чтобы не запрашивать их повторно
 
-  function voicePath(time, i) { return 'audio/' + time + '/' + pad(i + 1) + '.mp3'; }
+  // Озвучка лежит по голосам: audio/female/night/01.mp3, audio/male/night/01.mp3
+  var VOICES = ['female', 'male'];
+  var voiceGender = loadPref('affirmations-voice-gender', 'female');
+  if (VOICES.indexOf(voiceGender) < 0) voiceGender = 'female';
+  function voicePath(gender, time, i) { return 'audio/' + gender + '/' + time + '/' + pad(i + 1) + '.mp3'; }
 
   function clearVoiceTimers() {
     if (timeoutId) clearTimeout(timeoutId);
@@ -494,39 +501,50 @@
 
     var item = items[i];
     var done = afterPhrase(i, my);
-    if (!item.src || missing[item.src]) { speakWithDevice(item.text, done, my); return; }
-
-    voiceSource = 'mp3';
-    var fellBack = false;
-    var fallback = function () {
-      if (fellBack || my !== session) return;
-      fellBack = true;
-      missing[item.src] = true;
-      speakWithDevice(item.text, done, my);
-    };
-    var start = function (url) {
-      if (my !== session) return;
-      voiceEl.onended = done;
-      voiceEl.onerror = fallback;
-      voiceEl.src = url;
-      var p = voiceEl.play();
-      if (p && p.catch) p.catch(function (err) {
-        if (my !== session) return;
-        if (err && err.name === 'NotAllowedError') {
-          pausePlayback();
-          els.statusMsg.textContent = 'Браузер заблокировал звук. Нажмите «Продолжить».';
-        } else if (err && err.name !== 'AbortError') {
-          fallback();
-        }
-      });
-    };
     var rate = voiceRate;
-    if (rate === 1) { start(item.src); return; }
-    // Если обработать не вышло — играем исходный файл (а если его нет, сработает голос устройства)
-    pacedVoiceUrl(item.src, rate).then(start, function () { start(item.src); });
+
+    // Пробуем файлы по очереди: выбранный голос → другой голос → голос устройства
+    var tryFile = function () {
+      var src = firstAvailable(item.srcs);
+      if (!src) { speakWithDevice(item.text, done, my); return; }
+      voiceSource = 'mp3';
+      var failed = false;
+      var fallback = function () {
+        if (failed || my !== session) return;
+        failed = true;
+        missing[src] = true;
+        tryFile();
+      };
+      var start = function (url) {
+        if (my !== session) return;
+        voiceEl.onended = done;
+        voiceEl.onerror = fallback;
+        voiceEl.src = url;
+        var p = voiceEl.play();
+        if (p && p.catch) p.catch(function (err) {
+          if (my !== session) return;
+          if (err && err.name === 'NotAllowedError') {
+            pausePlayback();
+            els.statusMsg.textContent = 'Браузер заблокировал звук. Нажмите «Продолжить».';
+          } else if (err && err.name !== 'AbortError') {
+            fallback();
+          }
+        });
+      };
+      if (rate === 1) { start(src); return; }
+      // Если обработать не вышло — играем исходный файл (а если его нет, сработает запасной вариант)
+      pacedVoiceUrl(src, rate).then(start, function () { start(src); });
+    };
+    tryFile();
+
     // Заранее готовим следующую фразу, чтобы переход был без задержки
-    var next = items[(i + 1) % items.length];
-    if (next.src && !missing[next.src]) pacedVoiceUrl(next.src, rate).catch(function () {});
+    var nextSrc = firstAvailable(items[(i + 1) % items.length].srcs);
+    if (rate !== 1 && nextSrc) pacedVoiceUrl(nextSrc, rate).catch(function () {});
+  }
+
+  function firstAvailable(srcs) {
+    for (var k = 0; k < srcs.length; k++) if (!missing[srcs[k]]) return srcs[k];
+    return null;
   }
 
   // --- Фоновая музыка ---
@@ -693,6 +711,22 @@
     savePref('affirmations-voice-rate', voiceRate);
     haptic('select');
     applyVoiceRate();
+  });
+
+  // Голос диктора: женский / мужской. Применяется со следующей фразы.
+  function applyVoiceGender() {
+    Array.prototype.forEach.call(els.genderChips.children, function (b) {
+      b.setAttribute('aria-pressed', b.getAttribute('data-voice') === voiceGender ? 'true' : 'false');
+    });
+  }
+  applyVoiceGender();
+  els.genderChips.addEventListener('click', function (e) {
+    var b = e.target.closest('button');
+    if (!b) return;
+    voiceGender = b.getAttribute('data-voice');
+    savePref('affirmations-voice-gender', voiceGender);
+    haptic('select');
+    applyVoiceGender();
   });
 
   // --- Управление воспроизведением ---

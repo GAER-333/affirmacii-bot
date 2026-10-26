@@ -59,6 +59,8 @@
     voiceVolume: document.getElementById('voiceVolume'),
     speedChips: document.getElementById('speedChips'),
     genderChips: document.getElementById('genderChips'),
+    loadingLabel: document.getElementById('loadingLabel'),
+    loadingText: document.getElementById('loadingText'),
     sleepChips: document.getElementById('sleepChips'),
     sleepLeft: document.getElementById('sleepLeft'),
     listCard: document.getElementById('listCard'),
@@ -147,6 +149,16 @@
     persistCustom(); renderSet(); renderPlayback();
   });
 
+  // --- Индикатор загрузки ---
+  // Показываем, пока готовится голос или музыка (только во время воспроизведения)
+  var loading = { voice: false, music: false };
+  function setLoading(kind, on) {
+    loading[kind] = on;
+    var text = state.mode !== 'playing' ? '' : loading.voice ? 'загрузка голоса…' : loading.music ? 'загрузка музыки…' : '';
+    els.loadingText.textContent = text;
+    els.loadingLabel.hidden = !text;
+  }
+
   // --- Отрисовка ---
   function renderSet() {
     var set = AFFIRMATIONS[state.time];
@@ -234,6 +246,14 @@
     applyTheme(false);
     renderSet();
     renderPlayback();
+    prefetchMusic();
+  }
+
+  // Заранее качаем первый трек текущего времени суток — к нажатию «Слушать» он обычно уже готов
+  var prefetchId = null;
+  function prefetchMusic() {
+    clearTimeout(prefetchId);
+    prefetchId = setTimeout(function () { loadTrack(state.time, 0); }, 1200);
   }
 
   // --- Ползунок переключателя ---
@@ -324,7 +344,7 @@
     if (voice) { u.voice = voice; u.lang = voice.lang; } else { u.lang = 'ru-RU'; }
     u.rate = 0.88 * voiceRate; u.pitch = 1.05; u.volume = voiceGain();
     var started = false;
-    u.onstart = function () { started = true; };
+    u.onstart = function () { started = true; setLoading('voice', false); };
     u.onend = function () { if (my === session) onDone(); };
     u.onerror = function (e) {
       if (my !== session || (e && (e.error === 'interrupted' || e.error === 'canceled'))) return;
@@ -347,6 +367,7 @@
   // первым нажатием на «Слушать», и дальше фразы могут играть сами.
   var voiceEl = new Audio();
   voiceEl.preload = 'auto';
+  voiceEl.addEventListener('playing', function () { setLoading('voice', false); });
   var missing = {}; // файлы, которых нет — чтобы не запрашивать их повторно
 
   // Озвучка лежит по голосам: audio/female/night/01.mp3, audio/male/night/01.mp3
@@ -498,6 +519,7 @@
     state.currentIndex = i;
     state.phase = 'voice';
     renderPlayback();
+    setLoading('voice', true); // снимется, когда голос реально зазвучит
 
     var item = items[i];
     var done = afterPhrase(i, my);
@@ -555,27 +577,34 @@
   var MAX_TRACKS = 5;        // сколько треков на одно время суток ищем максимум
   var CROSSFADE_S = 4;       // на сколько секунд следующий трек накладывается на конец предыдущего
   var TARGET_RMS_DB = -24;   // к этой средней громкости выравниваются все треки
-  var musicLibrary = {};     // время суток → Promise со списком загруженных треков
+  var trackCache = {};       // адрес файла → Promise с описанием трека (null — файла нет)
   var deck = null;           // два плеера по очереди — чтобы треки могли перекрываться
   var musicTime = null, musicTrack = 0;
+  var musicRun = 0;          // растёт при каждом старте/остановке музыки — старые загрузки игнорируются
   var synth = null, reverb = null, loop = null;
 
   function musicUrl(time, k) { return 'audio/music/' + time + (k ? '-' + (k + 1) : '') + '.mp3'; }
 
-  // Загружаем треки по порядку, пока не встретится отсутствующий файл
-  function loadTracks(time) {
-    if (musicLibrary[time]) return musicLibrary[time];
-    var tracks = [];
-    function load(k) {
-      if (k >= MAX_TRACKS) return Promise.resolve(tracks);
-      return new Tone.ToneAudioBuffer().load(musicUrl(time, k)).then(function (buf) {
+  // Загружаем один трек. Треки качаются по одному: первый — чтобы скорее заиграть,
+  // следующий — в фоне, пока звучит текущий. Каждый файл скачивается только один раз.
+  function loadTrack(time, k) {
+    var url = musicUrl(time, k);
+    if (!(url in trackCache)) {
+      trackCache[url] = new Tone.ToneAudioBuffer().load(url).then(function (buf) {
         var info = describeTrack(buf);
-        if (info.length > CROSSFADE_S * 3) tracks.push(info);
-        return load(k + 1);
-      }, function () { return tracks; });
+        return info.length > CROSSFADE_S * 3 ? info : null;
+      }, function () { return null; });
     }
-    musicLibrary[time] = load(0);
-    return musicLibrary[time];
+    return trackCache[url];
+  }
+
+  // Какой трек звучит после k: следующий по номеру, а если его нет — снова первый
+  function nextTrack(time, k) {
+    var next = k + 1 < MAX_TRACKS ? loadTrack(time, k + 1) : Promise.resolve(null);
+    return next.then(function (info) {
+      if (info) return { k: k + 1, info: info };
+      return loadTrack(time, 0).then(function (first) { return { k: 0, info: first }; });
+    });
   }
 
   // Где в треке начинается и заканчивается звук (обрезаем тишину) и насколько он громкий
@@ -594,28 +623,46 @@
 
   function startMusic() {
     if (state.mode !== 'playing') return;
-    var time = state.time;
+    var time = state.time, run = ++musicRun;
     if (musicTime !== time) { musicTime = time; musicTrack = 0; }
-    loadTracks(time).then(function (tracks) {
-      if (state.mode !== 'playing' || state.time !== time) return;
-      if (!tracks.length) { startSynth(); return; }
+    var alive = function () { return run === musicRun && state.mode === 'playing' && state.time === time; };
+    setLoading('music', true);
+    loadTrack(time, musicTrack).then(function (info) {
+      if (info || musicTrack === 0) return info;
+      musicTrack = 0; // трек, на котором остановились, пропал — начинаем с первого
+      return loadTrack(time, 0);
+    }).then(function (first) {
+      if (!alive()) return;
+      setLoading('music', false);
+      if (!first) { startSynth(); return; }
       if (!deck) deck = [0, 1].map(function () { return new Tone.Player({ fadeIn: 2, fadeOut: 2 }).toDestination(); });
       Tone.Transport.cancel();
       Tone.Transport.stop();
-      // Ставим трек k в очередь; когда он начнётся — сразу планируем следующий
-      var queue = function (k, when) {
+      var slot = 0; // плееры чередуются, чтобы конец одного трека мог наложиться на начало следующего
+      // Ставим трек в очередь; когда он начнётся — догружаем и планируем следующий
+      var play = function (k, info, when) {
         Tone.Transport.scheduleOnce(function (t) {
-          if (state.mode !== 'playing') return;
-          var tr = tracks[k % tracks.length];
-          var player = deck[k % 2];
-          player.buffer = tr.buffer;
-          player.volume.value = MUSIC_VOLUME_DB + tr.gainDb;
-          player.start(t, tr.start, tr.length);
-          musicTrack = k % tracks.length;
-          queue(k + 1, when + tr.length - CROSSFADE_S);
+          if (!alive()) return;
+          var player = deck[slot];
+          slot = 1 - slot;
+          player.buffer = info.buffer;
+          // Своё плавное затухание в конце трека — совпадает с наложением следующего,
+          // поэтому стык мягкий, даже если сам трек обрывается без затихания
+          var vol = MUSIC_VOLUME_DB + info.gainDb, end = t + info.length;
+          player.volume.cancelScheduledValues(t);
+          player.volume.setValueAtTime(vol, t);
+          player.volume.setValueAtTime(vol, end - CROSSFADE_S);
+          player.volume.linearRampToValueAtTime(vol - 40, end);
+          player.start(t, info.start, info.length);
+          musicTrack = k;
+          var nextAt = when + info.length - CROSSFADE_S;
+          nextTrack(time, k).then(function (n) {
+            // Если следующий трек грузился дольше, чем звучал текущий, — начинаем его сразу, как готов
+            if (alive() && n.info) play(n.k, n.info, Math.max(nextAt, Tone.Transport.seconds + 0.1));
+          });
         }, when);
       };
-      queue(musicTrack, 0);
+      play(musicTrack, first, 0);
       Tone.Transport.start();
     });
   }
@@ -642,6 +689,8 @@
   }
 
   function stopMusic() {
+    musicRun++; // недогруженные треки после остановки уже не запустятся
+    setLoading('music', false);
     if (deck) deck.forEach(function (p) { if (p.state === 'started') p.stop(); }); // с плавным затуханием
     Tone.Transport.cancel();
     if (loop) loop.stop(0);
@@ -777,6 +826,7 @@
     clearVoiceTimers();
     voiceEl.pause();
     if (window.speechSynthesis) window.speechSynthesis.cancel();
+    loading.voice = false;
     stopMusic();
     pauseSleepCountdown();
     renderPlayback();
@@ -793,6 +843,7 @@
     voiceEl.pause();
     if (window.speechSynthesis) window.speechSynthesis.cancel();
     if (resumeIntervalId) { clearInterval(resumeIntervalId); resumeIntervalId = null; }
+    loading.voice = false;
     stopMusic();
     pauseSleepCountdown();
     renderPlayback();
@@ -916,4 +967,5 @@
   renderSet();
   renderPlayback();
   renderSleep();
+  prefetchMusic();
 })();

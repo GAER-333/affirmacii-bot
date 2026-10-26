@@ -48,6 +48,10 @@ audio/
 раздел Ambient / Meditation): без вокала, без резких ударных, от 2–3 минут.
 Насколько музыка тише голоса, настраивается в `app.js` (`MUSIC_VOLUME_DB`).
 
-Сейчас стоят:
-- `night.mp3` — Siarhei Korbut, «Sleep of Nature (short)», Pixabay
-- `night-2.mp3` — BlubonRelaxon, «Music for Relax, Yoga, Meditation», Pixabay
+Сейчас стоят (все с Pixabay, ужаты до 128 кбит/с — для фона на слух разницы нет, а грузятся вдвое быстрее):
+- `morning.mp3` — jackcatorbooks, «Morning Clarity»
+- `morning-2.mp3` — jackcatorbooks, «Weightless Whispers»
+- `day.mp3` — prettyjohn1, «Calm»
+- `day-2.mp3` — nastelbom, «Calm Ambient»
+- `night.mp3` — Siarhei Korbut, «Sleep of Nature (short)»
+- `night-2.mp3` — BlubonRelaxon, «Music for Relax, Yoga, Meditation»

@@ -150,13 +150,22 @@
   });
 
   // --- Индикатор загрузки ---
-  // Показываем, пока готовится голос или музыка (только во время воспроизведения)
+  // Показываем, только если звук готовится дольше секунды: обычно фраза грузится за доли секунды,
+  // и мелькающий на каждой фразе значок только раздражает
   var loading = { voice: false, music: false };
+  var LOADING_DELAY_MS = 1000, loadingTimer = null;
   function setLoading(kind, on) {
     loading[kind] = on;
     var text = state.mode !== 'playing' ? '' : loading.voice ? 'загрузка голоса…' : loading.music ? 'загрузка музыки…' : '';
+    if (!text) {
+      clearTimeout(loadingTimer); loadingTimer = null;
+      els.loadingLabel.hidden = true;
+      return;
+    }
     els.loadingText.textContent = text;
-    els.loadingLabel.hidden = !text;
+    if (els.loadingLabel.hidden && !loadingTimer) {
+      loadingTimer = setTimeout(function () { loadingTimer = null; els.loadingLabel.hidden = false; }, LOADING_DELAY_MS);
+    }
   }
 
   // --- Отрисовка ---
@@ -539,6 +548,8 @@
       };
       var start = function (url) {
         if (my !== session) return;
+        voiceLevelDb = levelOf(src);
+        applyVoiceVolume(parseInt(els.voiceVolume.value, 10));
         voiceEl.onended = done;
         voiceEl.onerror = fallback;
         voiceEl.src = url;
@@ -722,11 +733,18 @@
       voiceEl.volume = 1; // теперь громкостью управляет регулятор — иначе она применится дважды
     } catch (e) { voiceGainNode = null; }
   }
+  // Поправка громкости текущего набора озвучки (см. audio/levels.js): тихие записи чуть усиливаем,
+  // громкие чуть приглушаем — чтобы все голоса звучали одинаково
+  var voiceLevelDb = 0;
+  function levelOf(src) {
+    var levels = window.VOICE_LEVELS || {};
+    return levels[src.split('/').slice(1, 3).join('/')] || 0; // 'audio/female/night/01.mp3' → 'female/night'
+  }
   function applyVoiceVolume(v) {
     els.voiceVolume.style.setProperty('--fill', v + '%');
-    var g = Math.pow(v / 100, 2);
+    var g = Math.pow(v / 100, 2) * Math.pow(10, voiceLevelDb / 20);
     if (voiceGainNode) voiceGainNode.gain.setTargetAtTime(g, voiceGainNode.context.currentTime, 0.05);
-    else voiceEl.volume = g; // запасной путь (работает везде, кроме iPhone)
+    else voiceEl.volume = Math.min(1, g); // запасной путь (работает везде, кроме iPhone; усилить так нельзя)
     // Голос устройства меняет громкость только со следующей фразы
   }
 
@@ -742,7 +760,7 @@
     });
   }
   bindSlider(els.musicVolume, 'affirmations-music-volume', 50, applyMusicVolume);
-  bindSlider(els.voiceVolume, 'affirmations-voice-volume', 100, applyVoiceVolume);
+  bindSlider(els.voiceVolume, 'affirmations-voice-volume', 80, applyVoiceVolume);
 
   // Темп речи: 0.8× … 1.1×. Для mp3 меняются паузы между словами (см. «Темп речи» выше),
   // голос устройства просто говорит медленнее или быстрее. Применяется со следующей фразы.

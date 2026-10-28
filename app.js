@@ -507,11 +507,11 @@
   // музыка → musicBus (затухание по таймеру сна) → musicVol (громкость музыки) ┴→ master → выход
   // Telegram на Android, сворачиваясь, глушит звук страницы, если в ней не играет аудиоплеер.
   // Пока проверяем два способа это обойти (переключатель внизу страницы):
-  //   'carrier' — звук идёт напрямую, а внутри звуковой системы крутится почти беззвучная дорожка-«несущая»;
-  //   'stream'  — весь звук сводится в один поток и играет через аудиоплеер страницы.
+  //   'media'  — готовые дорожки в обычных плеерах (см. «Android: готовые дорожки» ниже);
+  //   'stream' — весь звук сводится в один поток и играет через аудиоплеер страницы (в фоне хрипит).
   // На остальных устройствах звук идёт напрямую.
   var isAndroid = /Android/i.test(navigator.userAgent);
-  var outputMode = loadPref('affirmations-output', 'carrier') === 'stream' ? 'stream' : 'carrier';
+  var outputMode = loadPref('affirmations-output', 'media') === 'stream' ? 'stream' : 'media';
   var voiceBus = null, musicBus = null, musicVol = null, master = null;
   var streamDest = null, outEl = null, outStopId = null;
   function musicGainFor(v) { return v === 0 ? 0 : Math.pow(v / 100, 2) * 2.5; }
@@ -531,7 +531,7 @@
       } catch (e) { streamDest = null; outEl = null; }
     }
     if (useStream()) { master.connect(streamDest); logEvent('вывод: вариант 2 (через аудиоплеер)'); }
-    else { master.connect(c.destination); logEvent(isAndroid ? 'вывод: вариант 1 (несущая внутри)' : 'вывод: напрямую'); }
+    else { master.connect(c.destination); logEvent(isAndroid ? 'вывод: вариант 1 (обычные плееры)' : 'вывод: напрямую'); }
   }
 
   function ensureBuses() {
@@ -560,9 +560,8 @@
       if (p && p.catch) p.catch(function (err) {
         logEvent('плеер не запустился: ' + (err && err.name));
         if (outEl !== el || !useStream()) return;
-        outputMode = 'carrier'; // запасной путь — вариант 1
+        outputMode = 'media'; // запасной путь — вариант 1, со следующего «Слушать»
         routeOutput();
-        startCarrier();
       });
     } else {
       if (outEl) outEl.pause();
@@ -593,10 +592,10 @@
       if (!b) return;
       outputMode = b.getAttribute('data-out');
       savePref('affirmations-output', outputMode);
+      if (state.mode !== 'stopped') stopPlayback(); // способ меняется только между прослушиваниями
       haptic('select');
       renderOutputSwitch();
       if (master) routeOutput();
-      if (state.mode === 'playing') startOutput();
     });
   }
 
@@ -702,6 +701,7 @@
 
   function cancelVoice() {
     session++;
+    if (voiceEl) voiceEl.pause();
     if (startCheckId) { clearTimeout(startCheckId); startCheckId = null; }
     if (window.speechSynthesis) window.speechSynthesis.cancel();
     if (!vq) return;
@@ -713,6 +713,7 @@
 
   // Начать с фразы i (offset — с какой секунды внутри фразы, delayS — через сколько секунд)
   function startVoice(i, offset, delayS) {
+    if (mediaMode()) { startVoiceMedia(i, offset); return; }
     cancelVoice();
     ensureBuses();
     var items = playlist();
@@ -728,6 +729,11 @@
   // Голос, темп или список фраз поменялись на ходу: текущая фраза дозвучит как есть,
   // а со следующей очередь строится заново
   function replanVoice() {
+    if (mediaMode()) {
+      // Склеиваем дорожку заново и продолжаем со следующей фразы
+      if (state.mode === 'playing') { var c = voiceNowMedia(); startVoiceMedia(c ? c.i + 1 : (state.currentIndex || 0)); }
+      return;
+    }
     var q = vq;
     if (state.mode !== 'playing' || !q) return;
     if (q.ttsIndex !== null) { q.replan = true; return; } // голос устройства договорит, потом перестроим
@@ -746,6 +752,7 @@
 
   // Какая фраза звучит прямо сейчас — по часам звуковой системы
   function voiceNow() {
+    if (mediaMode()) return voiceNowMedia();
     var q = vq;
     if (!q) return null;
     if (q.ttsIndex !== null) return { i: q.ttsIndex, phase: 'voice', node: null };
@@ -761,6 +768,152 @@
     if (!cur) return;
     state.phase = cur.phase;
     if (cur.i !== state.currentIndex) { state.currentIndex = cur.i; renderPlayback(); }
+  }
+
+  // --- Android: готовые дорожки в обычных плеерах ---
+  // Telegram на Android, когда приложение свёрнуто, глушит звук, который страница собирает сама
+  // (Web Audio), но не трогает обычные аудиоплееры. Поэтому на Android (вариант 1):
+  //  — голос: все фразы с паузами заранее склеиваются в одну дорожку, она играет по кругу —
+  //    в фоне не нужно ничего запускать;
+  //  — музыка: mp3 в обычном плеере. В свёрнутом приложении текущий трек повторяется,
+  //    при открытом треки сменяют друг друга.
+  // Свои фразы (их читает голос устройства) в склеенную дорожку не попадают.
+  function mediaMode() { return isAndroid && outputMode === 'media'; }
+  var mv = null;                 // склеенный голос: { key, url, segs: [{ i, start, end }] }
+  var voiceEl = null, musicEl = null;
+
+  function ensureMediaEls() {
+    if (voiceEl) return;
+    voiceEl = new Audio();
+    musicEl = new Audio();
+    [[voiceEl, 'голос'], [musicEl, 'музыка']].forEach(function (pair) {
+      pair[0].loop = true;
+      pair[0].preload = 'auto';
+      ['play', 'pause', 'stalled', 'error'].forEach(function (ev) {
+        pair[0].addEventListener(ev, function () { logEvent(pair[1] + ': ' + ev); });
+      });
+    });
+    musicEl.addEventListener('timeupdate', onMusicTime);
+  }
+
+  function mediaKey(items) {
+    return state.time + '|' + voiceGender + '|' + voiceRate + '|' + items.map(function (it) { return it.text; }).join('§');
+  }
+
+  // Склеиваем фразы: фраза, пауза, фраза, пауза… Громкость наборов выравниваем сразу
+  function buildVoiceTrack(items) {
+    var key = mediaKey(items);
+    if (mv && mv.key === key) return Promise.resolve(mv);
+    var rate = voiceRate;
+    return Promise.all(items.map(function (it) {
+      return it.custom ? Promise.resolve(null) : resolveVoice(it, rate);
+    })).then(function (vs) {
+      var sr = 0;
+      vs.forEach(function (v) { if (v && !sr) sr = v.buffer.sampleRate; });
+      if (!sr) return null;
+      var gap = Math.round(gapS(rate) * sr), total = 0;
+      vs.forEach(function (v) { if (v) total += v.buffer.length + gap; });
+      var data = new Float32Array(total), pos = 0, segs = [];
+      vs.forEach(function (v, i) {
+        if (!v) return;
+        var b = v.buffer, chs = b.numberOfChannels, g = v.gain / chs;
+        for (var c = 0; c < chs; c++) {
+          var src = b.getChannelData(c);
+          for (var k = 0; k < src.length; k++) data[pos + k] += src[k] * g;
+        }
+        segs.push({ i: i, start: pos / sr, end: (pos + b.length) / sr });
+        pos += b.length + gap;
+      });
+      var old = mv;
+      mv = {
+        key: key, segs: segs,
+        url: URL.createObjectURL(encodeWav({
+          numberOfChannels: 1, sampleRate: sr, length: total,
+          getChannelData: function () { return data; },
+        })),
+      };
+      if (old) setTimeout(function () { URL.revokeObjectURL(old.url); }, 5000);
+      return mv;
+    });
+  }
+
+  function startVoiceMedia(i, offset) {
+    cancelVoice();
+    ensureMediaEls();
+    var items = playlist();
+    if (!items.length) { stopPlayback(); return; }
+    i = ((i % items.length) + items.length) % items.length;
+    state.currentIndex = i;
+    state.phase = 'voice';
+    renderPlayback();
+    var my = session;
+    buildVoiceTrack(items).then(function (track) {
+      if (my !== session || state.mode !== 'playing') return;
+      if (!track || !track.segs.length) { logEvent('голос: нет озвученных фраз'); return; }
+      // Своя фраза в дорожку не входит — начинаем со следующей озвученной
+      var seg = track.segs.filter(function (s) { return s.i >= i; })[0] || track.segs[0];
+      var at = seg.start + (seg.i === i ? (offset || 0) : 0);
+      if (voiceEl.src !== track.url) voiceEl.src = track.url;
+      voiceEl.volume = Math.min(1, voiceGain());
+      var go = function () {
+        if (my !== session) return;
+        try { voiceEl.currentTime = at; } catch (e) {}
+        var p = voiceEl.play();
+        if (p && p.catch) p.catch(function (err) { logEvent('голос не запустился: ' + (err && err.name)); });
+      };
+      if (voiceEl.readyState >= 1) go(); else voiceEl.addEventListener('loadedmetadata', go, { once: true });
+    }, function () { logEvent('голос: не удалось собрать дорожку'); });
+  }
+
+  // Какая фраза звучит — по положению в склеенной дорожке
+  function voiceNowMedia() {
+    if (!mv || !voiceEl || voiceEl.src !== mv.url) return null;
+    var t = voiceEl.currentTime, cur = mv.segs[0];
+    mv.segs.forEach(function (s) { if (s.start <= t) cur = s; });
+    return { i: cur.i, phase: t < cur.end ? 'voice' : 'gap', node: null };
+  }
+
+  function musicKey(time, k) { return time + (k ? '-' + (k + 1) : ''); }
+  function musicCount(time) {
+    var levels = window.MUSIC_LEVELS || {}, n = 0;
+    while (n < MAX_TRACKS && (musicKey(time, n) in levels)) n++;
+    return n;
+  }
+  function applyMusicElVolume() {
+    if (!musicEl) return;
+    var lv = (window.MUSIC_LEVELS || {})[musicKey(musicTime, musicTrack)] || 0;
+    var g = musicGainFor(parseInt(els.musicVolume.value, 10)) * Tone.dbToGain(MUSIC_VOLUME_DB + lv);
+    musicEl.volume = Math.max(0, Math.min(1, g));
+  }
+
+  function playMusicEl() {
+    var p = musicEl.play();
+    if (p && p.catch) p.catch(function (err) { logEvent('музыка не запустилась: ' + (err && err.name)); });
+  }
+
+  function startMusicMedia() {
+    ensureMediaEls();
+    var time = state.time, n = musicCount(time);
+    if (musicTime !== time) { musicTime = time; musicTrack = 0; musicEl.removeAttribute('src'); }
+    if (!n) { logEvent('музыка: нет треков'); return; }
+    if (musicTrack >= n) musicTrack = 0;
+    var url = new URL(musicUrl(time, musicTrack), location.href).href;
+    if (musicEl.src !== url) musicEl.src = url;
+    applyMusicElVolume();
+    playMusicEl();
+  }
+
+  // Пока приложение открыто — у конца трека переключаемся на следующий.
+  // В свёрнутом приложении трек просто повторяется (плеер стоит «по кругу»).
+  function onMusicTime() {
+    if (!mediaMode() || state.mode !== 'playing' || document.hidden) return;
+    var d = musicEl.duration, n = musicCount(musicTime);
+    if (!d || n < 2 || musicEl.currentTime < d - 0.6) return;
+    musicTrack = (musicTrack + 1) % n;
+    musicEl.src = musicUrl(musicTime, musicTrack);
+    applyMusicElVolume();
+    playMusicEl();
+    logEvent('музыка: трек ' + (musicTrack + 1));
   }
 
   // --- Фоновая музыка ---
@@ -815,7 +968,7 @@
   }
 
   function startMusic() {
-    if (state.mode !== 'playing') return;
+    if (state.mode !== 'playing' || mediaMode()) return;
     ensureBuses();
     var time = state.time, run = ++musicRun;
     if (musicTime !== time) { musicTime = time; musicTrack = 0; }
@@ -898,6 +1051,7 @@
 
   function stopMusic() {
     musicRun++; // недогруженные треки после остановки уже не запустятся
+    if (musicEl) musicEl.pause();
     if (mq) {
       var now = audioCtx().currentTime;
       mq.nodes.forEach(function (n) {
@@ -915,12 +1069,14 @@
   function applyMusicVolume(v) {
     els.musicVolume.style.setProperty('--fill', v + '%');
     if (musicVol) musicVol.gain.setTargetAtTime(musicGainFor(v), audioCtx().currentTime, 0.05);
+    applyMusicElVolume();
   }
 
   function voiceGain() { return Math.pow(parseInt(els.voiceVolume.value, 10) / 100, 2); }
   function applyVoiceVolume(v) {
     els.voiceVolume.style.setProperty('--fill', v + '%');
     if (voiceBus) voiceBus.gain.setTargetAtTime(Math.pow(v / 100, 2), audioCtx().currentTime, 0.05);
+    if (voiceEl) voiceEl.volume = Math.min(1, Math.pow(v / 100, 2));
     // Голос устройства меняет громкость только со следующей фразы
   }
   // Где в треке начинается и заканчивается звук (обрезаем тишину) и насколько он громкий
@@ -992,13 +1148,12 @@
   // Весь наш звук идёт через Web Audio, поэтому параллельно крутим «несущую» дорожку — тишину по кругу.
   // Заодно iPhone считает приложение плеером: звук не глохнет от переключателя «Без звука»
   // и не обрывается при блокировке экрана.
-  // На Android та же дорожка не даёт Telegram заглушить звук при сворачивании (вариант 1).
   // Кнопки системного плеера на Android не подключаем: система присылает через них «паузу».
   var isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
     (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   var carrier = null;
   function startCarrier() {
-    if (!isIOS && !(isAndroid && outputMode === 'carrier')) return;
+    if (!isIOS) return;
     try {
       if (!carrier) {
         // 30 секунд почти тишины: еле заметный шум на −80 дБ — его не слышно,
@@ -1015,14 +1170,6 @@
         ['play', 'pause', 'stalled', 'error'].forEach(function (ev) {
           carrier.addEventListener(ev, function () { logEvent('несущая: ' + ev); });
         });
-        // На Android дорожка должна идти внутрь звуковой системы, а не рядом с ней:
-        // только тогда Telegram в фоне не глушит звук (так было устроено в первой версии с голосом)
-        if (isAndroid) {
-          try {
-            audioCtx().createMediaElementSource(carrier).connect(master);
-            logEvent('несущая подключена к звуку');
-          } catch (e) { logEvent('несущая: не подключилась'); }
-        }
       }
       var p = carrier.play();
       if (p && p.catch) p.catch(function () {});
@@ -1031,17 +1178,20 @@
   function stopCarrier() { if (carrier) carrier.pause(); }
 
   // --- Управление воспроизведением ---
-  var uiTimer = null, topupTimer = null;
+  var uiTimer = null, topupTimer = null, pulseTimer = null;
   var resumeFrom = null; // где остановились внутри фразы: { i, offset, rate, gender }
 
   function topUp() { scheduleVoice(); scheduleMusic(); }
   function startTimers() {
     if (!uiTimer) uiTimer = setInterval(refreshNow, 250);
     if (!topupTimer) topupTimer = setInterval(topUp, TOPUP_MS);
+    if (!pulseTimer) pulseTimer = setInterval(function () {
+      if (document.hidden) logEvent('в фоне: приложение не спит');
+    }, 15000);
   }
   function stopTimers() {
-    clearInterval(uiTimer); clearInterval(topupTimer);
-    uiTimer = topupTimer = null;
+    clearInterval(uiTimer); clearInterval(topupTimer); clearInterval(pulseTimer);
+    uiTimer = topupTimer = pulseTimer = null;
     if (resumeIntervalId) { clearInterval(resumeIntervalId); resumeIntervalId = null; }
   }
 
@@ -1050,6 +1200,7 @@
     Tone.start().then(startMusic).catch(function () {});
     ensureBuses();
     startOutput();
+    if (mediaMode()) startMusicMedia();
     if (!resumeIntervalId) {
       // Chrome иногда «засыпает» посреди долгой озвучки голосом устройства — будим
       resumeIntervalId = setInterval(function () {
@@ -1077,6 +1228,14 @@
     var i = state.currentIndex === null ? 0 : state.currentIndex;
     var r = resumeFrom;
     resumeFrom = null;
+    // Android: дорожка та же — просто продолжаем с того же места
+    if (mediaMode() && r && r.media && mv && r.key === mediaKey(playlist())) {
+      session++;
+      var p = voiceEl.play();
+      if (p && p.catch) p.catch(function (err) { logEvent('голос не запустился: ' + (err && err.name)); });
+      renderPlayback();
+      return;
+    }
     if (state.phase === 'gap') { startVoice(i + 1); return; }
     // Продолжаем фразу с того же места (чуть отступив назад), если голос и темп не меняли
     var same = r && r.i === i && r.rate === voiceRate && r.gender === voiceGender;
@@ -1099,7 +1258,8 @@
     if (cur) {
       state.currentIndex = cur.i;
       state.phase = cur.phase;
-      if (cur.phase === 'voice' && cur.node) {
+      if (mediaMode() && mv) resumeFrom = { media: true, key: mv.key };
+      else if (cur.phase === 'voice' && cur.node) {
         resumeFrom = { i: cur.i, offset: cur.node.offset + (now - cur.node.start), rate: voiceRate, gender: voiceGender };
       }
     }
@@ -1215,7 +1375,7 @@
     haptic('select');
     if (state.mode === 'playing') {
       startSleepCountdown();
-      replanVoice(); // убрать фразы, которые не успеют до таймера, или продлить очередь, если таймер выключили
+      if (!mediaMode()) replanVoice(); // убрать фразы, которые не успеют до таймера, или продлить очередь
       scheduleMusic();
     }
     renderSleep();
@@ -1262,6 +1422,8 @@
     if (sleep.intervalId) tickSleep();
     if (state.mode !== 'playing') return;
     if ((carrier && carrier.paused) || (useStream() && outEl.paused)) startOutput();
+    if (mediaMode() && voiceEl && voiceEl.paused && voiceEl.src) voiceEl.play().catch(function () {});
+    if (mediaMode() && musicEl && musicEl.paused && musicEl.src) playMusicEl();
     topUp();
     refreshNow();
     if (vq && vq.ttsIndex !== null && window.speechSynthesis && !window.speechSynthesis.speaking) {

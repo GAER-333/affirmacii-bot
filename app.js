@@ -507,7 +507,7 @@
   // музыка → musicBus (затухание по таймеру сна) → musicVol (громкость музыки) ┴→ master → выход
   // Telegram на Android, сворачиваясь, глушит звук страницы, если в ней не играет аудиоплеер.
   // Пока проверяем два способа это обойти (переключатель внизу страницы):
-  //   'carrier' — звук идёт напрямую, а рядом крутится почти беззвучная дорожка-«несущая»;
+  //   'carrier' — звук идёт напрямую, а внутри звуковой системы крутится почти беззвучная дорожка-«несущая»;
   //   'stream'  — весь звук сводится в один поток и играет через аудиоплеер страницы.
   // На остальных устройствах звук идёт напрямую.
   var isAndroid = /Android/i.test(navigator.userAgent);
@@ -531,7 +531,7 @@
       } catch (e) { streamDest = null; outEl = null; }
     }
     if (useStream()) { master.connect(streamDest); logEvent('вывод: вариант 2 (через аудиоплеер)'); }
-    else { master.connect(c.destination); logEvent(isAndroid ? 'вывод: вариант 1 (напрямую + несущая)' : 'вывод: напрямую'); }
+    else { master.connect(c.destination); logEvent(isAndroid ? 'вывод: вариант 1 (несущая внутри)' : 'вывод: напрямую'); }
   }
 
   function ensureBuses() {
@@ -1015,6 +1015,14 @@
         ['play', 'pause', 'stalled', 'error'].forEach(function (ev) {
           carrier.addEventListener(ev, function () { logEvent('несущая: ' + ev); });
         });
+        // На Android дорожка должна идти внутрь звуковой системы, а не рядом с ней:
+        // только тогда Telegram в фоне не глушит звук (так было устроено в первой версии с голосом)
+        if (isAndroid) {
+          try {
+            audioCtx().createMediaElementSource(carrier).connect(master);
+            logEvent('несущая подключена к звуку');
+          } catch (e) { logEvent('несущая: не подключилась'); }
+        }
       }
       var p = carrier.play();
       if (p && p.catch) p.catch(function () {});

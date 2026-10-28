@@ -895,8 +895,13 @@
   // Весь наш звук идёт через Web Audio, поэтому параллельно крутим «несущую» дорожку — тишину по кругу.
   // Заодно iPhone считает приложение плеером: звук не глохнет от переключателя «Без звука»
   // и не обрывается при блокировке экрана.
+  // Только на iPhone/iPad: Android, сворачивая Telegram, ставит такую дорожку на паузу
+  // и присылает команду «пауза» — из-за этого замолкало вообще всё.
+  var isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   var carrier = null;
   function startCarrier() {
+    if (!isIOS) return;
     try {
       if (!carrier) {
         var n = 8000 * 30, zeros = new Float32Array(n); // 30 секунд тишины
@@ -1105,7 +1110,16 @@
 
   // --- Работа в фоне и экран блокировки ---
   // Media Session — название фразы и кнопки «пауза / вперёд / назад» на экране блокировки.
-  var media = 'mediaSession' in navigator ? navigator.mediaSession : null;
+  // Тоже только для iPhone — на Android в Telegram такого плеера нет, а системные команды мешают.
+  var media = isIOS && 'mediaSession' in navigator ? navigator.mediaSession : null;
+  // Когда приложение сворачивают, система может сама прислать «паузу». Это не нажатие пользователя:
+  // такую команду в первые секунды после сворачивания пропускаем, звук играет дальше.
+  var hiddenAt = 0;
+  document.addEventListener('visibilitychange', function () { if (document.hidden) hiddenAt = Date.now(); });
+  function userPause() {
+    if (document.hidden && Date.now() - hiddenAt < 2000) return;
+    pausePlayback();
+  }
   function updateMediaSession(text) {
     if (!media) return;
     try {
@@ -1118,7 +1132,7 @@
   if (media) {
     try {
       media.setActionHandler('play', function () { if (state.mode !== 'playing') togglePlay(); });
-      media.setActionHandler('pause', pausePlayback);
+      media.setActionHandler('pause', userPause);
       media.setActionHandler('nexttrack', function () { step(1); });
       media.setActionHandler('previoustrack', function () { step(-1); });
     } catch (e) {}

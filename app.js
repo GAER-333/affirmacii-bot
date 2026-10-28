@@ -41,8 +41,7 @@
   // Номер «сеанса». Растёт при каждой смене фразы, паузе и остановке —
   // так запоздалые события от прошлой фразы просто игнорируются.
   var session = 0;
-  var voiceSource = null; // чем озвучивается текущая фраза: 'mp3' или 'tts' (голос устройства)
-  var timeoutId = null, startCheckId = null, resumeIntervalId = null;
+  var startCheckId = null, resumeIntervalId = null;
 
   var els = {
     seg: document.getElementById('seg'),
@@ -59,8 +58,6 @@
     voiceVolume: document.getElementById('voiceVolume'),
     speedChips: document.getElementById('speedChips'),
     genderChips: document.getElementById('genderChips'),
-    loadingLabel: document.getElementById('loadingLabel'),
-    loadingText: document.getElementById('loadingText'),
     sleepChips: document.getElementById('sleepChips'),
     sleepLeft: document.getElementById('sleepLeft'),
     listCard: document.getElementById('listCard'),
@@ -139,6 +136,7 @@
     els.input.value = '';
     haptic('medium');
     persistCustom(); renderSet(); renderPlayback();
+    replanVoice(); // новая фраза войдёт в очередь, если сейчас играет
   }
   els.addBtn.addEventListener('click', addPhrase);
   els.input.addEventListener('keydown', function (e) { if (e.key === 'Enter') addPhrase(); });
@@ -148,25 +146,6 @@
     custom[state.time] = [];
     persistCustom(); renderSet(); renderPlayback();
   });
-
-  // --- Индикатор загрузки ---
-  // Показываем, только если звук готовится дольше секунды: обычно фраза грузится за доли секунды,
-  // и мелькающий на каждой фразе значок только раздражает
-  var loading = { voice: false, music: false };
-  var LOADING_DELAY_MS = 1000, loadingTimer = null;
-  function setLoading(kind, on) {
-    loading[kind] = on;
-    var text = state.mode !== 'playing' ? '' : loading.voice ? 'загрузка голоса…' : loading.music ? 'загрузка музыки…' : '';
-    if (!text) {
-      clearTimeout(loadingTimer); loadingTimer = null;
-      els.loadingLabel.hidden = true;
-      return;
-    }
-    els.loadingText.textContent = text;
-    if (els.loadingLabel.hidden && !loadingTimer) {
-      loadingTimer = setTimeout(function () { loadingTimer = null; els.loadingLabel.hidden = false; }, LOADING_DELAY_MS);
-    }
-  }
 
   // --- Отрисовка ---
   function renderSet() {
@@ -258,11 +237,14 @@
     prefetchMusic();
   }
 
-  // Заранее качаем первый трек текущего времени суток — к нажатию «Слушать» он обычно уже готов
+  // Заранее качаем первый трек и фразы текущего времени суток — к нажатию «Слушать» всё уже готово
   var prefetchId = null;
   function prefetchMusic() {
     clearTimeout(prefetchId);
-    prefetchId = setTimeout(function () { loadTrack(state.time, 0); }, 1200);
+    prefetchId = setTimeout(function () {
+      loadTrack(state.time, 0);
+      playlist().forEach(function (item) { if (!item.custom) resolveVoice(item, voiceRate); });
+    }, 1200);
   }
 
   // --- Ползунок переключателя ---
@@ -342,7 +324,6 @@
   }
 
   function speakWithDevice(text, onDone, my) {
-    voiceSource = 'tts';
     if (!window.speechSynthesis) {
       stopPlayback();
       els.statusMsg.textContent = 'Голос устройства недоступен, а озвучка этой фразы ещё не загружена.';
@@ -353,7 +334,7 @@
     if (voice) { u.voice = voice; u.lang = voice.lang; } else { u.lang = 'ru-RU'; }
     u.rate = 0.88 * voiceRate; u.pitch = 1.05; u.volume = voiceGain();
     var started = false;
-    u.onstart = function () { started = true; setLoading('voice', false); };
+    u.onstart = function () { started = true; };
     u.onend = function () { if (my === session) onDone(); };
     u.onerror = function (e) {
       if (my !== session || (e && (e.error === 'interrupted' || e.error === 'canceled'))) return;
@@ -371,36 +352,27 @@
     window.speechSynthesis.speak(u);
   }
 
-  // --- Голос из mp3 ---
-  // Один и тот же <audio> используется для всех фраз: на iPhone он «разблокируется»
-  // первым нажатием на «Слушать», и дальше фразы могут играть сами.
-  var voiceEl = new Audio();
-  voiceEl.preload = 'auto';
-  voiceEl.addEventListener('playing', function () { setLoading('voice', false); });
-  var missing = {}; // файлы, которых нет — чтобы не запрашивать их повторно
+  // --- Как устроен звук ---
+  // Фразы и музыка ставятся в очередь звуковой системы заранее, с точным временем начала —
+  // как ноты в партитуре. Дальше они звучат сами, даже когда экран заблокирован и телефон
+  // «усыпил» приложение. Пока приложение не спит, очередь просто продлевается вперёд.
+  var HORIZON_S = 60 * 60;   // на сколько вперёд расписываем звук — на час
+  var TOPUP_MS = 15000;      // как часто продлеваем расписание, пока приложение не спит
+
+  function audioCtx() { return Tone.getContext().rawContext; }
 
   // Озвучка лежит по голосам: audio/female/night/01.mp3, audio/male/night/01.mp3
   var VOICES = ['female', 'male'];
   var voiceGender = loadPref('affirmations-voice-gender', 'female');
   if (VOICES.indexOf(voiceGender) < 0) voiceGender = 'female';
   function voicePath(gender, time, i) { return 'audio/' + gender + '/' + time + '/' + pad(i + 1) + '.mp3'; }
+  var missing = {}; // файлы, которых нет — чтобы не запрашивать их повторно
 
-  function clearVoiceTimers() {
-    if (timeoutId) clearTimeout(timeoutId);
-    if (startCheckId) clearTimeout(startCheckId);
-    timeoutId = startCheckId = null;
-  }
-
-  // Что делать, когда фраза дозвучала: выдержать паузу и перейти к следующей.
-  // При медленном темпе пауза между фразами тоже чуть длиннее.
-  function afterPhrase(i, my) {
-    return function () {
-      if (my !== session) return;
-      state.phase = 'gap';
-      timeoutId = setTimeout(function () {
-        if (my === session) playPhrase(i + 1);
-      }, PAUSE_MS / voiceRate);
-    };
+  // Поправка громкости набора озвучки (см. audio/levels.js): тихие записи чуть усиливаем,
+  // громкие чуть приглушаем — чтобы все голоса звучали одинаково
+  function levelOf(src) {
+    var levels = window.VOICE_LEVELS || {};
+    return levels[src.split('/').slice(1, 3).join('/')] || 0; // 'audio/female/night/01.mp3' → 'female/night'
   }
 
   // --- Темп речи ---
@@ -408,28 +380,39 @@
   // между словами (где голос затихает) и удлиняем только их. Слова звучат с обычной скоростью.
   // При ускорении — наоборот, паузы укорачиваются.
   var decodedVoice = {}; // src → Promise с раскодированным звуком
-  var pacedVoice = {};   // src|темп → Promise с адресом готового файла
+  var pacedVoice = {};   // src|темп → Promise со звуком в нужном темпе
 
   function decodeVoice(src) {
     if (!decodedVoice[src]) {
       decodedVoice[src] = fetch(src).then(function (r) {
         if (!r.ok) throw new Error('нет файла');
         return r.arrayBuffer();
-      }).then(function (data) { return Tone.getContext().rawContext.decodeAudioData(data); });
+      }).then(function (data) { return audioCtx().decodeAudioData(data); });
     }
     return decodedVoice[src];
   }
 
-  function pacedVoiceUrl(src, rate) {
+  function voiceBuffer(src, rate) {
+    if (rate === 1) return decodeVoice(src);
     var key = src + '|' + rate;
     if (!pacedVoice[key]) {
-      pacedVoice[key] = decodeVoice(src).then(function (buf) {
-        return URL.createObjectURL(encodeWav(stretchPauses(buf, rate)));
-      });
+      pacedVoice[key] = decodeVoice(src).then(function (buf) { return stretchPauses(buf, rate); });
     }
     return pacedVoice[key];
   }
 
+  // Звук для фразы: выбранный голос → другой голос → null (тогда читает голос устройства)
+  function resolveVoice(item, rate) {
+    var srcs = item.srcs.filter(function (s) { return !missing[s]; }), k = 0;
+    var attempt = function () {
+      if (k >= srcs.length) return Promise.resolve(null);
+      var src = srcs[k++];
+      return voiceBuffer(src, rate).then(function (buf) {
+        return { buffer: buf, gain: Math.pow(10, levelOf(src) / 20) };
+      }, function () { missing[src] = true; return attempt(); });
+    };
+    return attempt();
+  }
   function stretchPauses(buf, rate) {
     var sr = buf.sampleRate, n = buf.length, data = buf.getChannelData(0);
     // Громкость окнами по 10 мс
@@ -502,185 +485,299 @@
     return new Blob([view], { type: 'audio/wav' });
   }
 
-  // iPhone разрешает плееру звучать, только если первый play() был прямо из нажатия.
-  // Обработка темпа занимает доли секунды, поэтому «разблокируем» плеер коротким кусочком тишины.
-  var voiceUnlocked = false;
-  function unlockVoice() {
-    if (voiceUnlocked) return;
-    voiceUnlocked = true;
+  // --- Каналы микшера ---
+  // Голос идёт через свой регулятор громкости прямо на выход.
+  // Музыка — через Tone.js (её регулятор — Tone.Destination) и свой канал: на нём таймер сна
+  // заранее расписывает плавное затухание.
+  var voiceBus = null, musicBus = null;
+  function ensureBuses() {
+    if (voiceBus) return;
+    var c = audioCtx();
+    voiceBus = c.createGain();
+    voiceBus.gain.value = voiceGain();
+    voiceBus.connect(c.destination);
+    musicBus = c.createGain();
+    Tone.connect(musicBus, Tone.Destination);
+  }
+
+  // Плавно заглушить звук из очереди: ещё не начавшийся — просто отменить
+  function silenceNode(n, now, fadeS) {
     try {
-      var silence = Tone.getContext().rawContext.createBuffer(1, 2205, 44100);
-      voiceEl.src = URL.createObjectURL(encodeWav(silence));
-      var p = voiceEl.play();
-      if (p && p.catch) p.catch(function () {});
+      if (n.start > now) { n.src.stop(); n.gain.disconnect(); return; }
+      var p = n.gain.gain;
+      if (p.cancelAndHoldAtTime) p.cancelAndHoldAtTime(now); else p.cancelScheduledValues(now);
+      p.setTargetAtTime(0, now, fadeS / 4);
+      n.src.stop(now + fadeS);
     } catch (e) {}
   }
 
-  function playPhrase(i) {
-    if (state.mode !== 'playing') return;
+  function playBuffer(buffer, at, offset, duration, gainValue, dest) {
+    var c = audioCtx();
+    var src = c.createBufferSource(), g = c.createGain();
+    src.buffer = buffer;
+    g.gain.value = gainValue;
+    src.connect(g);
+    g.connect(dest);
+    src.onended = function () { try { g.disconnect(); } catch (e) {} };
+    if (duration === undefined) src.start(at, offset); else src.start(at, offset, duration);
+    return { src: src, gain: g };
+  }
+
+  // До какого момента расписываем звук: на час вперёд, но не дальше таймера сна
+  function horizonEnd() {
+    var end = audioCtx().currentTime + HORIZON_S;
+    return sleepEndAt ? Math.min(end, sleepEndAt) : end;
+  }
+
+  // --- Очередь фраз ---
+  // vq.nodes — расписанные фразы по порядку: { src, gain, i, start, end, offset }
+  var vq = null;
+
+  function newQueue(items, i, at, offset) {
+    var q = { items: items, rate: voiceRate, ready: [], waits: [], next: i, at: at, offset: offset || 0,
+              nodes: [], ttsIndex: null, ttsWait: false, ttsTimer: null, replan: false };
+    // Качаем все фразы сразу, начиная с той, что прозвучит первой
+    for (var n = 0; n < items.length; n++) loadVoiceItem(q, (i + n) % items.length);
+    return q;
+  }
+
+  function loadVoiceItem(q, k) {
+    if (!q.waits[k]) {
+      var item = q.items[k];
+      q.waits[k] = (item.custom ? Promise.resolve(null) : resolveVoice(item, q.rate))
+        .then(function (v) { q.ready[k] = v; return v; });
+    }
+    return q.waits[k];
+  }
+
+  function gapS(rate) { return PAUSE_MS / 1000 / rate; } // при медленном темпе пауза между фразами длиннее
+
+  // Расписываем фразы вперёд, пока не упрёмся в горизонт, недогруженную фразу или свою фразу
+  // (её читает голос устройства — заранее в очередь её не поставить)
+  function scheduleVoice() {
+    var q = vq;
+    if (!q || state.mode !== 'playing' || q.ttsWait) return;
+    var now = audioCtx().currentTime, limit = horizonEnd();
+    if (q.at < now + 0.05) q.at = now + 0.05; // очередь кончилась, пока приложение спало
+    while (q.at < limit) {
+      var k = q.next;
+      if (q.ready[k] === undefined) {
+        loadVoiceItem(q, k).then(function () { if (vq === q) scheduleVoice(); });
+        break;
+      }
+      var v = q.ready[k];
+      if (!v) { scheduleTts(q, k); break; }
+      var offset = Math.min(q.offset, v.buffer.duration), dur = v.buffer.duration - offset;
+      if (sleepEndAt && q.at + dur > sleepEndAt) break; // не успеет дозвучать до таймера сна
+      var node = playBuffer(v.buffer, q.at, offset, undefined, v.gain, voiceBus);
+      node.i = k; node.start = q.at; node.end = q.at + dur; node.offset = offset;
+      q.nodes.push(node);
+      q.offset = 0;
+      q.at = node.end + gapS(q.rate);
+      q.next = (k + 1) % q.items.length;
+    }
+    // Отзвучавшие фразы из списка убираем (последнюю начавшуюся оставляем — она «текущая»)
+    while (q.nodes.length > 1 && q.nodes[1].start <= now) q.nodes.shift();
+  }
+
+  // Своя фраза: в нужный момент приложение само просит голос устройства прочитать её.
+  // Если экран заблокирован, это может не сработать — такая фраза дождётся возвращения в приложение.
+  function scheduleTts(q, k) {
+    q.ttsWait = true;
+    q.ttsTimer = setTimeout(function () {
+      if (vq !== q || state.mode !== 'playing') return;
+      q.ttsIndex = k;
+      refreshNow();
+      speakWithDevice(q.items[k].text, function () {
+        if (vq !== q) return;
+        if (q.replan) { startVoice(k + 1, 0, gapS(voiceRate)); return; }
+        q.ttsIndex = null;
+        q.ttsWait = false;
+        q.at = audioCtx().currentTime + gapS(q.rate);
+        q.next = (k + 1) % q.items.length;
+        scheduleVoice();
+      }, session);
+    }, Math.max(0, (q.at - audioCtx().currentTime) * 1000));
+  }
+
+  function cancelVoice() {
+    session++;
+    if (startCheckId) { clearTimeout(startCheckId); startCheckId = null; }
+    if (window.speechSynthesis) window.speechSynthesis.cancel();
+    if (!vq) return;
+    var now = audioCtx().currentTime;
+    clearTimeout(vq.ttsTimer);
+    vq.nodes.forEach(function (n) { silenceNode(n, now, 0.12); });
+    vq = null;
+  }
+
+  // Начать с фразы i (offset — с какой секунды внутри фразы, delayS — через сколько секунд)
+  function startVoice(i, offset, delayS) {
+    cancelVoice();
+    ensureBuses();
     var items = playlist();
     if (!items.length) { stopPlayback(); return; }
     i = ((i % items.length) + items.length) % items.length;
-    var my = ++session;
-    clearVoiceTimers();
-    voiceEl.pause();
-    if (window.speechSynthesis) window.speechSynthesis.cancel();
     state.currentIndex = i;
     state.phase = 'voice';
+    vq = newQueue(items, i, audioCtx().currentTime + 0.05 + (delayS || 0), offset);
     renderPlayback();
-    setLoading('voice', true); // снимется, когда голос реально зазвучит
-
-    var item = items[i];
-    var done = afterPhrase(i, my);
-    var rate = voiceRate;
-
-    // Пробуем файлы по очереди: выбранный голос → другой голос → голос устройства
-    var tryFile = function () {
-      var src = firstAvailable(item.srcs);
-      if (!src) { speakWithDevice(item.text, done, my); return; }
-      voiceSource = 'mp3';
-      var failed = false;
-      var fallback = function () {
-        if (failed || my !== session) return;
-        failed = true;
-        missing[src] = true;
-        tryFile();
-      };
-      var start = function (url) {
-        if (my !== session) return;
-        voiceLevelDb = levelOf(src);
-        applyVoiceVolume(parseInt(els.voiceVolume.value, 10));
-        voiceEl.onended = done;
-        voiceEl.onerror = fallback;
-        voiceEl.src = url;
-        var p = voiceEl.play();
-        if (p && p.catch) p.catch(function (err) {
-          if (my !== session) return;
-          if (err && err.name === 'NotAllowedError') {
-            pausePlayback();
-            els.statusMsg.textContent = 'Браузер заблокировал звук. Нажмите «Продолжить».';
-          } else if (err && err.name !== 'AbortError') {
-            fallback();
-          }
-        });
-      };
-      if (rate === 1) { start(src); return; }
-      // Если обработать не вышло — играем исходный файл (а если его нет, сработает запасной вариант)
-      pacedVoiceUrl(src, rate).then(start, function () { start(src); });
-    };
-    tryFile();
-
-    // Заранее готовим следующую фразу, чтобы переход был без задержки
-    var nextSrc = firstAvailable(items[(i + 1) % items.length].srcs);
-    if (rate !== 1 && nextSrc) pacedVoiceUrl(nextSrc, rate).catch(function () {});
+    scheduleVoice();
   }
 
-  function firstAvailable(srcs) {
-    for (var k = 0; k < srcs.length; k++) if (!missing[srcs[k]]) return srcs[k];
-    return null;
+  // Голос, темп или список фраз поменялись на ходу: текущая фраза дозвучит как есть,
+  // а со следующей очередь строится заново
+  function replanVoice() {
+    var q = vq;
+    if (state.mode !== 'playing' || !q) return;
+    if (q.ttsIndex !== null) { q.replan = true; return; } // голос устройства договорит, потом перестроим
+    var cur = voiceNow();
+    if (!cur || !cur.node) { startVoice(q.next); return; } // первая фраза ещё не началась
+    var now = audioCtx().currentTime;
+    var keep = cur.phase === 'voice' ? cur.node : null;
+    clearTimeout(q.ttsTimer);
+    q.nodes.forEach(function (n) { if (n !== keep) silenceNode(n, now, 0.12); });
+    var items = playlist();
+    var nq = newQueue(items, (cur.i + 1) % items.length, Math.max(cur.node.end + gapS(voiceRate), now + 0.05), 0);
+    nq.nodes.push(cur.node);
+    vq = nq;
+    scheduleVoice();
+  }
+
+  // Какая фраза звучит прямо сейчас — по часам звуковой системы
+  function voiceNow() {
+    var q = vq;
+    if (!q) return null;
+    if (q.ttsIndex !== null) return { i: q.ttsIndex, phase: 'voice', node: null };
+    var now = audioCtx().currentTime, cur = null;
+    for (var n = 0; n < q.nodes.length && q.nodes[n].start <= now; n++) cur = q.nodes[n];
+    return cur ? { i: cur.i, phase: now < cur.end ? 'voice' : 'gap', node: cur } : null;
+  }
+
+  // Обновляем экран под то, что звучит (пока приложение открыто)
+  function refreshNow() {
+    if (state.mode !== 'playing') return;
+    var cur = voiceNow();
+    if (!cur) return;
+    state.phase = cur.phase;
+    if (cur.i !== state.currentIndex) { state.currentIndex = cur.i; renderPlayback(); }
   }
 
   // --- Фоновая музыка ---
   // Треки лежат в audio/music: night.mp3, night-2.mp3, night-3.mp3… — свои для каждого времени суток.
   // Играют по очереди и по кругу, с плавным перекрёстным переходом — без провалов и щелчков на стыке.
   // Если файлов нет — включается мягкий синтезатор из прототипа.
-  // Голос идёт мимо Tone.js, поэтому громкость Tone.Destination меняет только музыку.
   var MAX_TRACKS = 5;        // сколько треков на одно время суток ищем максимум
   var CROSSFADE_S = 4;       // на сколько секунд следующий трек накладывается на конец предыдущего
+  var FADE_IN_S = 2;         // плавное начало трека
   var TARGET_RMS_DB = -24;   // к этой средней громкости выравниваются все треки
   var trackCache = {};       // адрес файла → Promise с описанием трека (null — файла нет)
-  var deck = null;           // два плеера по очереди — чтобы треки могли перекрываться
+  var trackReady = {};       // адрес файла → описание трека, когда он уже загружен (null — файла нет)
   var musicTime = null, musicTrack = 0;
   var musicRun = 0;          // растёт при каждом старте/остановке музыки — старые загрузки игнорируются
+  var mq = null;             // очередь треков: { run, time, nodes, at, k }
   var synth = null, reverb = null, loop = null;
 
   function musicUrl(time, k) { return 'audio/music/' + time + (k ? '-' + (k + 1) : '') + '.mp3'; }
 
-  // Загружаем один трек. Треки качаются по одному: первый — чтобы скорее заиграть,
-  // следующий — в фоне, пока звучит текущий. Каждый файл скачивается только один раз.
+  // Загружаем один трек. Каждый файл скачивается только один раз.
   function loadTrack(time, k) {
     var url = musicUrl(time, k);
     if (!(url in trackCache)) {
       trackCache[url] = new Tone.ToneAudioBuffer().load(url).then(function (buf) {
         var info = describeTrack(buf);
         return info.length > CROSSFADE_S * 3 ? info : null;
-      }, function () { return null; });
+      }, function () { return null; }).then(function (info) {
+        trackReady[url] = info;
+        return info;
+      });
     }
     return trackCache[url];
   }
 
-  // Какой трек звучит после k: следующий по номеру, а если его нет — снова первый
-  function nextTrack(time, k) {
-    var next = k + 1 < MAX_TRACKS ? loadTrack(time, k + 1) : Promise.resolve(null);
-    return next.then(function (info) {
-      if (info) return { k: k + 1, info: info };
-      return loadTrack(time, 0).then(function (first) { return { k: 0, info: first }; });
-    });
+  // Качаем треки по очереди: первый, второй… пока файлы есть
+  function loadAllTracks(time, onEach) {
+    var k = 0;
+    var next = function () {
+      loadTrack(time, k).then(function (info) {
+        if (!info) return;
+        onEach(k);
+        if (++k < MAX_TRACKS) next();
+      });
+    };
+    next();
   }
 
-  // Где в треке начинается и заканчивается звук (обрезаем тишину) и насколько он громкий
-  function describeTrack(buf) {
-    var raw = buf.get(), data = raw.getChannelData(0), sr = raw.sampleRate, n = data.length;
-    var lead = 0; while (lead < n && Math.abs(data[lead]) < 0.003) lead++;
-    var tail = n - 1; while (tail > lead && Math.abs(data[tail]) < 0.003) tail--;
-    var sum = 0, count = 0;
-    for (var i = lead; i < tail; i += 16) { sum += data[i] * data[i]; count++; }
-    var rmsDb = 10 * Math.log10(sum / Math.max(1, count) || 1e-12);
-    return {
-      buffer: buf, start: lead / sr, length: (tail - lead) / sr,
-      gainDb: Math.max(-8, Math.min(8, TARGET_RMS_DB - rmsDb)),
-    };
+  // Какой трек звучит после k: следующий по номеру, если он уже загружен, иначе снова первый
+  function nextLoadedTrack(time, k) {
+    var info = k + 1 < MAX_TRACKS ? trackReady[musicUrl(time, k + 1)] : null;
+    return info ? k + 1 : 0;
   }
 
   function startMusic() {
     if (state.mode !== 'playing') return;
+    ensureBuses();
     var time = state.time, run = ++musicRun;
     if (musicTime !== time) { musicTime = time; musicTrack = 0; }
+    var startK = musicTrack;
     var alive = function () { return run === musicRun && state.mode === 'playing' && state.time === time; };
-    setLoading('music', true);
-    loadTrack(time, musicTrack).then(function (info) {
-      if (info || musicTrack === 0) return info;
-      musicTrack = 0; // трек, на котором остановились, пропал — начинаем с первого
+    loadTrack(time, startK).then(function (info) {
+      if (info || startK === 0) return info;
+      startK = 0; // трек, на котором остановились, пропал — начинаем с первого
       return loadTrack(time, 0);
     }).then(function (first) {
       if (!alive()) return;
-      setLoading('music', false);
       if (!first) { startSynth(); return; }
-      if (!deck) deck = [0, 1].map(function () { return new Tone.Player({ fadeIn: 2, fadeOut: 2 }).toDestination(); });
-      Tone.Transport.cancel();
-      Tone.Transport.stop();
-      var slot = 0; // плееры чередуются, чтобы конец одного трека мог наложиться на начало следующего
-      // Ставим трек в очередь; когда он начнётся — догружаем и планируем следующий
-      var play = function (k, info, when) {
-        Tone.Transport.scheduleOnce(function (t) {
-          if (!alive()) return;
-          var player = deck[slot];
-          slot = 1 - slot;
-          player.buffer = info.buffer;
-          // Своё плавное затухание в конце трека — совпадает с наложением следующего,
-          // поэтому стык мягкий, даже если сам трек обрывается без затихания
-          var vol = MUSIC_VOLUME_DB + info.gainDb, end = t + info.length;
-          player.volume.cancelScheduledValues(t);
-          player.volume.setValueAtTime(vol, t);
-          player.volume.setValueAtTime(vol, end - CROSSFADE_S);
-          player.volume.linearRampToValueAtTime(vol - 40, end);
-          player.start(t, info.start, info.length);
-          musicTrack = k;
-          var nextAt = when + info.length - CROSSFADE_S;
-          nextTrack(time, k).then(function (n) {
-            // Если следующий трек грузился дольше, чем звучал текущий, — начинаем его сразу, как готов
-            if (alive() && n.info) play(n.k, n.info, Math.max(nextAt, Tone.Transport.seconds + 0.1));
-          });
-        }, when);
-      };
-      play(musicTrack, first, 0);
-      Tone.Transport.start();
+      mq = { run: run, time: time, nodes: [], at: audioCtx().currentTime + 0.05, k: startK };
+      scheduleMusic();
+      // Остальные треки догружаются в фоне; как только очередной готов — включаем его в очередь
+      loadAllTracks(time, function (k) { if (k > 0 && alive() && mq && mq.run === run) replanMusic(); });
     });
+  }
+
+  function scheduleMusic() {
+    var q = mq;
+    if (!q || state.mode !== 'playing') return;
+    var now = audioCtx().currentTime, limit = horizonEnd();
+    if (q.at < now + 0.05) q.at = now + 0.05;
+    while (q.at < limit) {
+      var info = trackReady[musicUrl(q.time, q.k)];
+      if (!info) { q.k = 0; info = trackReady[musicUrl(q.time, 0)]; if (!info) return; }
+      // Своё плавное затухание в конце трека совпадает с наложением следующего,
+      // поэтому стык мягкий, даже если сам трек обрывается без затихания
+      var vol = Tone.dbToGain(MUSIC_VOLUME_DB + info.gainDb), start = q.at, end = start + info.length;
+      var node = playBuffer(info.buffer.get(), start, info.start, info.length, 0, musicBus);
+      var p = node.gain.gain;
+      p.setValueAtTime(0, start);
+      p.linearRampToValueAtTime(vol, start + FADE_IN_S);
+      p.setValueAtTime(vol, end - CROSSFADE_S);
+      p.linearRampToValueAtTime(0, end);
+      node.k = q.k; node.start = start; node.end = end;
+      q.nodes.push(node);
+      q.at = end - CROSSFADE_S;
+      q.k = nextLoadedTrack(q.time, q.k);
+    }
+    while (q.nodes.length > 1 && q.nodes[0].end < now) q.nodes.shift();
+  }
+
+  // Догрузился новый трек — пересобираем ещё не начавшуюся часть очереди, чтобы он в неё вошёл
+  function replanMusic() {
+    var q = mq;
+    if (!q) return;
+    var now = audioCtx().currentTime;
+    q.nodes = q.nodes.filter(function (n) {
+      if (n.start > now + 0.5) { silenceNode(n, now, 0.1); return false; }
+      return true;
+    });
+    var last = q.nodes[q.nodes.length - 1];
+    if (last) { q.at = last.end - CROSSFADE_S; q.k = nextLoadedTrack(q.time, last.k); }
+    scheduleMusic();
   }
 
   function startSynth() {
     if (!synth) {
-      reverb = new Tone.Reverb({ decay: 9, wet: 0.55 }).toDestination();
+      reverb = new Tone.Reverb({ decay: 9, wet: 0.55 });
+      reverb.connect(musicBus);
       synth = new Tone.PolySynth(Tone.Synth, {
         oscillator: { type: 'sine' },
         envelope: { attack: 2.5, decay: 1, sustain: 0.8, release: 5 },
@@ -701,9 +798,14 @@
 
   function stopMusic() {
     musicRun++; // недогруженные треки после остановки уже не запустятся
-    setLoading('music', false);
-    if (deck) deck.forEach(function (p) { if (p.state === 'started') p.stop(); }); // с плавным затуханием
-    Tone.Transport.cancel();
+    if (mq) {
+      var now = audioCtx().currentTime;
+      mq.nodes.forEach(function (n) {
+        if (n.start <= now) musicTrack = n.k; // после паузы продолжим с этого трека
+        silenceNode(n, now, 2);               // с плавным затуханием
+      });
+      mq = null;
+    }
     if (loop) loop.stop(0);
     if (synth) synth.releaseAll();
     Tone.Transport.stop();
@@ -718,34 +820,24 @@
     } catch (e) {}
   }
 
-  // Громкость голоса. На iPhone у <audio> громкость менять нельзя, поэтому голос из mp3
-  // пропускаем через свой регулятор Web Audio — мимо регулятора музыки.
-  var voiceGainNode = null;
   function voiceGain() { return Math.pow(parseInt(els.voiceVolume.value, 10) / 100, 2); }
-  function connectVoice() {
-    if (voiceGainNode) return;
-    try {
-      var raw = Tone.getContext().rawContext;
-      voiceGainNode = raw.createGain();
-      voiceGainNode.gain.value = voiceGain();
-      raw.createMediaElementSource(voiceEl).connect(voiceGainNode);
-      voiceGainNode.connect(raw.destination);
-      voiceEl.volume = 1; // теперь громкостью управляет регулятор — иначе она применится дважды
-    } catch (e) { voiceGainNode = null; }
-  }
-  // Поправка громкости текущего набора озвучки (см. audio/levels.js): тихие записи чуть усиливаем,
-  // громкие чуть приглушаем — чтобы все голоса звучали одинаково
-  var voiceLevelDb = 0;
-  function levelOf(src) {
-    var levels = window.VOICE_LEVELS || {};
-    return levels[src.split('/').slice(1, 3).join('/')] || 0; // 'audio/female/night/01.mp3' → 'female/night'
-  }
   function applyVoiceVolume(v) {
     els.voiceVolume.style.setProperty('--fill', v + '%');
-    var g = Math.pow(v / 100, 2) * Math.pow(10, voiceLevelDb / 20);
-    if (voiceGainNode) voiceGainNode.gain.setTargetAtTime(g, voiceGainNode.context.currentTime, 0.05);
-    else voiceEl.volume = Math.min(1, g); // запасной путь (работает везде, кроме iPhone; усилить так нельзя)
+    if (voiceBus) voiceBus.gain.setTargetAtTime(Math.pow(v / 100, 2), audioCtx().currentTime, 0.05);
     // Голос устройства меняет громкость только со следующей фразы
+  }
+  // Где в треке начинается и заканчивается звук (обрезаем тишину) и насколько он громкий
+  function describeTrack(buf) {
+    var raw = buf.get(), data = raw.getChannelData(0), sr = raw.sampleRate, n = data.length;
+    var lead = 0; while (lead < n && Math.abs(data[lead]) < 0.003) lead++;
+    var tail = n - 1; while (tail > lead && Math.abs(data[tail]) < 0.003) tail--;
+    var sum = 0, count = 0;
+    for (var i = lead; i < tail; i += 16) { sum += data[i] * data[i]; count++; }
+    var rmsDb = 10 * Math.log10(sum / Math.max(1, count) || 1e-12);
+    return {
+      buffer: buf, start: lead / sr, length: (tail - lead) / sr,
+      gainDb: Math.max(-8, Math.min(8, TARGET_RMS_DB - rmsDb)),
+    };
   }
 
   // Подключаем ползунок: восстанавливаем сохранённое значение и запоминаем новое
@@ -778,6 +870,7 @@
     savePref('affirmations-voice-rate', voiceRate);
     haptic('select');
     applyVoiceRate();
+    replanVoice();
   });
 
   // Голос диктора: женский / мужской. Применяется со следующей фразы.
@@ -794,28 +887,69 @@
     savePref('affirmations-voice-gender', voiceGender);
     haptic('select');
     applyVoiceGender();
+    replanVoice();
   });
 
+  // --- Плеер на экране блокировки (iPhone) ---
+  // Системный плеер на экране блокировки появляется, только когда играет обычный аудиоэлемент.
+  // Весь наш звук идёт через Web Audio, поэтому параллельно крутим «несущую» дорожку — тишину по кругу.
+  // Заодно iPhone считает приложение плеером: звук не глохнет от переключателя «Без звука»
+  // и не обрывается при блокировке экрана.
+  var carrier = null;
+  function startCarrier() {
+    try {
+      if (!carrier) {
+        var n = 8000 * 30, zeros = new Float32Array(n); // 30 секунд тишины
+        carrier = new Audio();
+        carrier.loop = true;
+        carrier.setAttribute('playsinline', '');
+        carrier.src = URL.createObjectURL(encodeWav({
+          numberOfChannels: 1, sampleRate: 8000, length: n,
+          getChannelData: function () { return zeros; },
+        }));
+      }
+      var p = carrier.play();
+      if (p && p.catch) p.catch(function () {});
+    } catch (e) {}
+  }
+  function stopCarrier() { if (carrier) carrier.pause(); }
+
   // --- Управление воспроизведением ---
+  var uiTimer = null, topupTimer = null;
+  var resumeFrom = null; // где остановились внутри фразы: { i, offset, rate, gender }
+
+  function topUp() { scheduleVoice(); scheduleMusic(); }
+  function startTimers() {
+    if (!uiTimer) uiTimer = setInterval(refreshNow, 250);
+    if (!topupTimer) topupTimer = setInterval(topUp, TOPUP_MS);
+  }
+  function stopTimers() {
+    clearInterval(uiTimer); clearInterval(topupTimer);
+    uiTimer = topupTimer = null;
+    if (resumeIntervalId) { clearInterval(resumeIntervalId); resumeIntervalId = null; }
+  }
+
   function startAudioEngine() {
-    // Tone.start() должен вызываться прямо из нажатия — иначе браузер не даст включить звук
+    // Tone.start() и запуск аудиоэлемента должны быть прямо из нажатия — иначе браузер не даст включить звук
     Tone.start().then(startMusic).catch(function () {});
-    connectVoice();
-    unlockVoice();
+    ensureBuses();
+    startCarrier();
     if (!resumeIntervalId) {
-      // Chrome иногда «засыпает» посреди долгой озвучки — будим
+      // Chrome иногда «засыпает» посреди долгой озвучки голосом устройства — будим
       resumeIntervalId = setInterval(function () {
         if (window.speechSynthesis && window.speechSynthesis.speaking) window.speechSynthesis.resume();
       }, 6000);
     }
+    startTimers();
   }
 
   function playFrom(i) {
     els.statusMsg.textContent = '';
+    resumeFrom = null;
     var wasPlaying = state.mode === 'playing';
     state.mode = 'playing';
     if (!wasPlaying) { haptic('medium'); startAudioEngine(); startSleepCountdown(); }
-    playPhrase(i);
+    startVoice(i);
   }
 
   function resumePlayback() {
@@ -825,45 +959,45 @@
     startAudioEngine();
     startSleepCountdown();
     var i = state.currentIndex === null ? 0 : state.currentIndex;
-    // mp3 продолжаем с того же места; голос устройства так не умеет — повторяем фразу целиком
-    if (state.phase === 'voice' && voiceSource === 'mp3' && voiceEl.currentTime > 0 && !voiceEl.ended) {
-      var my = ++session;
-      voiceEl.onended = afterPhrase(i, my);
-      voiceEl.onerror = null;
-      renderPlayback();
-      voiceEl.play().catch(function () { if (my === session) playPhrase(i); });
-    } else {
-      playPhrase(state.phase === 'gap' ? i + 1 : i);
-    }
+    var r = resumeFrom;
+    resumeFrom = null;
+    if (state.phase === 'gap') { startVoice(i + 1); return; }
+    // Продолжаем фразу с того же места (чуть отступив назад), если голос и темп не меняли
+    var same = r && r.i === i && r.rate === voiceRate && r.gender === voiceGender;
+    startVoice(i, same ? Math.max(0, r.offset - 0.3) : 0);
+  }
+
+  function haltAudio() {
+    cancelVoice();
+    stopMusic();
+    stopCarrier();
+    stopTimers();
+    pauseSleepCountdown();
   }
 
   function pausePlayback() {
     if (state.mode !== 'playing') return;
-    session++;
+    var cur = voiceNow(), now = audioCtx().currentTime;
+    resumeFrom = null;
+    if (cur) {
+      state.currentIndex = cur.i;
+      state.phase = cur.phase;
+      if (cur.phase === 'voice' && cur.node) {
+        resumeFrom = { i: cur.i, offset: cur.node.offset + (now - cur.node.start), rate: voiceRate, gender: voiceGender };
+      }
+    }
     state.mode = 'paused';
-    clearVoiceTimers();
-    voiceEl.pause();
-    if (window.speechSynthesis) window.speechSynthesis.cancel();
-    loading.voice = false;
-    stopMusic();
-    pauseSleepCountdown();
+    haltAudio();
     renderPlayback();
   }
 
   function stopPlayback() {
     if (state.mode === 'stopped' && state.currentIndex === null) return;
-    session++;
     state.mode = 'stopped';
     state.currentIndex = null;
     state.phase = 'voice';
-    voiceSource = null;
-    clearVoiceTimers();
-    voiceEl.pause();
-    if (window.speechSynthesis) window.speechSynthesis.cancel();
-    if (resumeIntervalId) { clearInterval(resumeIntervalId); resumeIntervalId = null; }
-    loading.voice = false;
-    stopMusic();
-    pauseSleepCountdown();
+    resumeFrom = null;
+    haltAudio();
     renderPlayback();
   }
 
@@ -874,10 +1008,8 @@
     var base = state.currentIndex === null ? (delta > 0 ? -1 : 0) : state.currentIndex;
     var i = ((base + delta) % items.length + items.length) % items.length;
     haptic('light');
-    if (state.mode === 'playing') { playPhrase(i); return; }
-    session++;
-    voiceEl.pause();
-    voiceSource = null;
+    if (state.mode === 'playing') { startVoice(i); return; }
+    resumeFrom = null;
     state.currentIndex = i;
     state.phase = 'voice';
     state.mode = 'paused';
@@ -896,7 +1028,23 @@
 
   // --- Таймер сна ---
   // Отсчёт идёт только пока звучит: на паузе время не тратится.
+  // Конец таймера заранее записан и в расписание звука: последняя фраза — та, что успевает
+  // дозвучать, а музыка плавно затихает к нужной секунде. Так звук выключится вовремя,
+  // даже если экран заблокирован и приложение «спит».
+  var SLEEP_FADE_S = 15;
   var sleep = { minutes: 0, leftMs: 0, lastTick: 0, intervalId: null };
+  var sleepEndAt = null; // момент окончания по часам звуковой системы
+
+  function applySleepFade() {
+    if (!musicBus) return;
+    var p = musicBus.gain, now = audioCtx().currentTime;
+    p.cancelScheduledValues(now);
+    p.setValueAtTime(1, now);
+    if (sleepEndAt) {
+      p.setValueAtTime(1, Math.max(now, sleepEndAt - SLEEP_FADE_S));
+      p.linearRampToValueAtTime(0, sleepEndAt);
+    }
+  }
 
   function renderSleep() {
     Array.prototype.forEach.call(els.sleepChips.children, function (b) {
@@ -923,9 +1071,14 @@
     if (!sleep.minutes || sleep.intervalId) return;
     sleep.lastTick = Date.now();
     sleep.intervalId = setInterval(tickSleep, 1000);
+    ensureBuses();
+    sleepEndAt = audioCtx().currentTime + sleep.leftMs / 1000;
+    applySleepFade();
   }
 
   function pauseSleepCountdown() {
+    sleepEndAt = null;
+    applySleepFade();
     if (!sleep.intervalId) return;
     clearInterval(sleep.intervalId);
     sleep.intervalId = null;
@@ -942,12 +1095,16 @@
     sleep.minutes = parseInt(b.getAttribute('data-min'), 10);
     sleep.leftMs = sleep.minutes * 60000;
     haptic('select');
-    if (state.mode === 'playing') startSleepCountdown();
+    if (state.mode === 'playing') {
+      startSleepCountdown();
+      replanVoice(); // убрать фразы, которые не успеют до таймера, или продлить очередь, если таймер выключили
+      scheduleMusic();
+    }
     renderSleep();
   });
 
   // --- Работа в фоне и экран блокировки ---
-  // Media Session — кнопки «пауза / вперёд / назад» на экране блокировки и в шторке уведомлений.
+  // Media Session — название фразы и кнопки «пауза / вперёд / назад» на экране блокировки.
   var media = 'mediaSession' in navigator ? navigator.mediaSession : null;
   function updateMediaSession(text) {
     if (!media) return;
@@ -967,18 +1124,22 @@
     } catch (e) {}
   }
 
-  // Когда пользователь возвращается в приложение — «будим» звук, если система его приостановила
+  // Когда пользователь возвращается в приложение — «будим» звук, если система его приостановила,
+  // и подтягиваем экран к тому, что сейчас звучит
   function onReturn() {
     if (document.hidden || state.mode !== 'playing') return;
     try { if (Tone.context.state !== 'running') Tone.context.resume(); } catch (e) {}
-    if (state.phase === 'voice' && voiceSource === 'tts' && window.speechSynthesis && !window.speechSynthesis.speaking) {
-      playPhrase(state.currentIndex); // озвучку прервали в фоне — повторяем фразу
-    }
     if (sleep.intervalId) tickSleep();
+    if (state.mode !== 'playing') return;
+    if (carrier && carrier.paused) startCarrier();
+    topUp();
+    refreshNow();
+    if (vq && vq.ttsIndex !== null && window.speechSynthesis && !window.speechSynthesis.speaking) {
+      startVoice(vq.ttsIndex); // свою фразу прервали в фоне — повторяем
+    }
   }
   document.addEventListener('visibilitychange', onReturn);
   if (inTelegram) { try { tg.onEvent('activated', onReturn); } catch (e) {} }
-
   // --- Первый запуск ---
   applyTheme(true);
   placeThumb(false);

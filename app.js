@@ -1,4 +1,9 @@
 (function () {
+  // Звук готовится крупными порциями (latencyHint: 'playback'): кнопки реагируют на доли секунды
+  // медленнее — для аффирмаций это незаметно, зато звук не рвётся и не хрипит, когда телефон
+  // в фоне урезает приложению ресурсы.
+  try { Tone.setContext(new Tone.Context({ latencyHint: 'playback', lookAhead: 0.2 })); } catch (e) {}
+
   // --- Telegram Mini App ---
   // Если страница открыта внутри Telegram, tg.initData не пустой; в обычном браузере — пустой.
   var tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
@@ -71,6 +76,7 @@
     playLabel: document.getElementById('playLabel'),
     statusMsg: document.getElementById('statusMsg'),
     diag: document.getElementById('diag'),
+    outSwitch: document.getElementById('outSwitch'),
   };
 
   function pad(n) { return (n < 10 ? '0' : '') + n; }
@@ -499,11 +505,34 @@
   // --- Каналы микшера ---
   // голос  → voiceBus (громкость голоса) ────────────────────────────────┐
   // музыка → musicBus (затухание по таймеру сна) → musicVol (громкость музыки) ┴→ master → выход
-  // Выход на Android — через обычный аудиоплеер страницы (<audio>): Telegram, сворачиваясь,
-  // глушит звук страницы, если в ней не играет аудиоплеер. На остальных устройствах — напрямую.
+  // Telegram на Android, сворачиваясь, глушит звук страницы, если в ней не играет аудиоплеер.
+  // Пока проверяем два способа это обойти (переключатель внизу страницы):
+  //   'carrier' — звук идёт напрямую, а рядом крутится почти беззвучная дорожка-«несущая»;
+  //   'stream'  — весь звук сводится в один поток и играет через аудиоплеер страницы.
+  // На остальных устройствах звук идёт напрямую.
   var isAndroid = /Android/i.test(navigator.userAgent);
-  var voiceBus = null, musicBus = null, musicVol = null, master = null, outEl = null, outStopId = null;
+  var outputMode = loadPref('affirmations-output', 'carrier') === 'stream' ? 'stream' : 'carrier';
+  var voiceBus = null, musicBus = null, musicVol = null, master = null;
+  var streamDest = null, outEl = null, outStopId = null;
   function musicGainFor(v) { return v === 0 ? 0 : Math.pow(v / 100, 2) * 2.5; }
+  function useStream() { return isAndroid && outputMode === 'stream' && !!streamDest; }
+
+  function routeOutput() {
+    var c = audioCtx();
+    try { master.disconnect(); } catch (e) {}
+    if (isAndroid && outputMode === 'stream' && !streamDest && c.createMediaStreamDestination) {
+      try {
+        streamDest = c.createMediaStreamDestination();
+        outEl = new Audio();
+        outEl.srcObject = streamDest.stream;
+        ['play', 'pause', 'stalled', 'error'].forEach(function (ev) {
+          outEl.addEventListener(ev, function () { logEvent('плеер: ' + ev); });
+        });
+      } catch (e) { streamDest = null; outEl = null; }
+    }
+    if (useStream()) { master.connect(streamDest); logEvent('вывод: вариант 2 (через аудиоплеер)'); }
+    else { master.connect(c.destination); logEvent(isAndroid ? 'вывод: вариант 1 (напрямую + несущая)' : 'вывод: напрямую'); }
+  }
 
   function ensureBuses() {
     if (voiceBus) return;
@@ -518,41 +547,57 @@
     musicBus = c.createGain();
     musicBus.connect(musicVol);
     try { c.onstatechange = function () { logEvent('звук: ' + c.state); }; } catch (e) {}
-    if (isAndroid && c.createMediaStreamDestination) {
-      try {
-        var dest = c.createMediaStreamDestination();
-        master.connect(dest);
-        outEl = new Audio();
-        outEl.srcObject = dest.stream;
-        ['play', 'pause', 'stalled', 'suspend', 'error'].forEach(function (ev) {
-          outEl.addEventListener(ev, function () { logEvent('плеер: ' + ev); });
-        });
-        logEvent('вывод: через аудиоплеер');
-        return;
-      } catch (e) { outEl = null; }
-    }
-    master.connect(c.destination);
-    logEvent('вывод: напрямую');
+    try { logEvent('буфер звука: ' + Math.round((c.baseLatency || 0) * 1000) + ' мс'); } catch (e) {}
+    routeOutput();
   }
 
-  // Запуск аудиоплеера-выхода — должен быть прямо из нажатия
+  // Запуск выхода — должен быть прямо из нажатия
   function startOutput() {
     clearTimeout(outStopId);
-    if (!outEl) return;
-    var el = outEl, p = el.play();
-    if (p && p.catch) p.catch(function (err) {
-      logEvent('плеер не запустился: ' + (err && err.name));
-      if (outEl !== el) return;
-      // Запасной путь — звук напрямую, как раньше
-      try { master.disconnect(); master.connect(audioCtx().destination); } catch (e) {}
-      outEl = null;
-    });
+    if (useStream()) {
+      stopCarrier();
+      var el = outEl, p = el.play();
+      if (p && p.catch) p.catch(function (err) {
+        logEvent('плеер не запустился: ' + (err && err.name));
+        if (outEl !== el || !useStream()) return;
+        outputMode = 'carrier'; // запасной путь — вариант 1
+        routeOutput();
+        startCarrier();
+      });
+    } else {
+      if (outEl) outEl.pause();
+      startCarrier();
+    }
   }
   // Останавливаем выход чуть позже, чтобы музыка успела плавно затихнуть
   function stopOutput() {
     clearTimeout(outStopId);
-    if (!outEl) return;
-    outStopId = setTimeout(function () { if (state.mode !== 'playing' && outEl) outEl.pause(); }, 2500);
+    outStopId = setTimeout(function () {
+      if (state.mode === 'playing') return;
+      if (outEl) outEl.pause();
+      stopCarrier();
+    }, 2500);
+  }
+
+  // Временный переключатель способа (только на Android)
+  function renderOutputSwitch() {
+    if (!els.outSwitch) return;
+    els.outSwitch.hidden = !isAndroid;
+    Array.prototype.forEach.call(els.outSwitch.querySelectorAll('button'), function (b) {
+      b.setAttribute('aria-pressed', b.getAttribute('data-out') === outputMode ? 'true' : 'false');
+    });
+  }
+  if (els.outSwitch) {
+    els.outSwitch.addEventListener('click', function (e) {
+      var b = e.target.closest('button');
+      if (!b) return;
+      outputMode = b.getAttribute('data-out');
+      savePref('affirmations-output', outputMode);
+      haptic('select');
+      renderOutputSwitch();
+      if (master) routeOutput();
+      if (state.mode === 'playing') startOutput();
+    });
   }
 
   // Плавно заглушить звук из очереди: ещё не начавшийся — просто отменить
@@ -947,23 +992,29 @@
   // Весь наш звук идёт через Web Audio, поэтому параллельно крутим «несущую» дорожку — тишину по кругу.
   // Заодно iPhone считает приложение плеером: звук не глохнет от переключателя «Без звука»
   // и не обрывается при блокировке экрана.
-  // Только на iPhone/iPad: Android, сворачивая Telegram, ставит такую дорожку на паузу
-  // и присылает команду «пауза» — из-за этого замолкало вообще всё.
+  // На Android та же дорожка не даёт Telegram заглушить звук при сворачивании (вариант 1).
+  // Кнопки системного плеера на Android не подключаем: система присылает через них «паузу».
   var isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
     (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   var carrier = null;
   function startCarrier() {
-    if (!isIOS) return;
+    if (!isIOS && !(isAndroid && outputMode === 'carrier')) return;
     try {
       if (!carrier) {
-        var n = 8000 * 30, zeros = new Float32Array(n); // 30 секунд тишины
+        // 30 секунд почти тишины: еле заметный шум на −80 дБ — его не слышно,
+        // но система точно видит, что дорожка звучит
+        var n = 8000 * 30, quiet = new Float32Array(n);
+        for (var i = 0; i < n; i++) quiet[i] = (Math.random() * 2 - 1) * 0.0001;
         carrier = new Audio();
         carrier.loop = true;
         carrier.setAttribute('playsinline', '');
         carrier.src = URL.createObjectURL(encodeWav({
           numberOfChannels: 1, sampleRate: 8000, length: n,
-          getChannelData: function () { return zeros; },
+          getChannelData: function () { return quiet; },
         }));
+        ['play', 'pause', 'stalled', 'error'].forEach(function (ev) {
+          carrier.addEventListener(ev, function () { logEvent('несущая: ' + ev); });
+        });
       }
       var p = carrier.play();
       if (p && p.catch) p.catch(function () {});
@@ -991,7 +1042,6 @@
     Tone.start().then(startMusic).catch(function () {});
     ensureBuses();
     startOutput();
-    startCarrier();
     if (!resumeIntervalId) {
       // Chrome иногда «засыпает» посреди долгой озвучки голосом устройства — будим
       resumeIntervalId = setInterval(function () {
@@ -1028,7 +1078,6 @@
   function haltAudio() {
     cancelVoice();
     stopMusic();
-    stopCarrier();
     stopOutput();
     stopTimers();
     pauseSleepCountdown();
@@ -1204,8 +1253,7 @@
     try { if (Tone.context.state !== 'running') Tone.context.resume(); } catch (e) {}
     if (sleep.intervalId) tickSleep();
     if (state.mode !== 'playing') return;
-    if (carrier && carrier.paused) startCarrier();
-    if (outEl && outEl.paused) startOutput();
+    if ((carrier && carrier.paused) || (useStream() && outEl.paused)) startOutput();
     topUp();
     refreshNow();
     if (vq && vq.ttsIndex !== null && window.speechSynthesis && !window.speechSynthesis.speaking) {
@@ -1226,5 +1274,6 @@
   renderSet();
   renderPlayback();
   renderSleep();
+  renderOutputSwitch();
   prefetchMusic();
 })();

@@ -245,6 +245,8 @@ p.sub { color:var(--muted); font-size:.88rem; text-align:center; line-height:1.5
   transition: background-color .25s ease, color .25s ease, border-color .25s ease;
 }
 .chips button[aria-pressed="true"] { background:var(--accent); border-color:var(--accent); color:var(--on-accent); }
+.diag { color:var(--muted); font-size:.68rem; line-height:1.45; white-space:pre-wrap; margin:10px 0 0; font-family:ui-monospace,monospace; }
+.diag:empty { display:none; }
 #statusMsg { color:var(--accent-text); font-size:.8rem; text-align:center; margin-top:4px; line-height:1.5; min-height:1em; }
 
 @media (prefers-reduced-motion: reduce) {

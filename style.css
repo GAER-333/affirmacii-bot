@@ -236,7 +236,44 @@ p.sub { color:var(--muted); font-size:.88rem; text-align:center; line-height:1.5
 
 /* ---------- Таймер сна ---------- */
 .sleep-row { flex-direction:column; align-items:stretch; gap:10px; }
-.sleep-left { font-size:.8rem; font-weight:700; color:var(--accent-text); font-variant-numeric: tabular-nums; }
+.sleep-left { font-size:.8rem; font-weight:700; color:var(--accent-text); font-variant-numeric: tabular-nums; text-align:center; min-height:1.2em; margin-top:-4px; }
+.sleep-left:empty { display:none; }
+.sleep-value { display:flex; align-items:center; gap:8px; font-weight:800; font-variant-numeric: tabular-nums; }
+.sleep-off {
+  width:24px; height:24px; border-radius:50%; border:1px solid var(--border); background:none; cursor:pointer;
+  color:var(--muted); font:inherit; font-size:1rem; line-height:1; display:flex; align-items:center; justify-content:center; padding:0;
+}
+.sleep-off[hidden] { display:none; }
+.sleep-off:active { transform:scale(.9); }
+
+/* Линейка таймера: деление = 5 минут, подпись каждые 15 */
+.ruler { position:relative; height:56px; margin:0 -18px; outline:none; }
+.ruler:focus-visible .ruler-needle { box-shadow:0 0 0 3px var(--border); }
+.ruler-scroll {
+  height:100%; overflow-x:auto; overflow-y:hidden; scrollbar-width:none;
+  scroll-snap-type:x mandatory; overscroll-behavior-x:contain; touch-action:pan-x;
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 22%, #000 78%, transparent);
+          mask-image: linear-gradient(to right, transparent, #000 22%, #000 78%, transparent);
+  cursor:grab;
+}
+.ruler-scroll::-webkit-scrollbar { display:none; }
+.ruler-scroll.dragging { cursor:grabbing; scroll-snap-type:none; }
+.ruler-ticks { display:flex; height:100%; width:max-content; padding:0 calc(50% - 11px); }
+.tick { flex:0 0 22px; height:100%; position:relative; scroll-snap-align:center; }
+.tick::before {
+  content:''; position:absolute; left:50%; top:10px; width:2px; height:10px; margin-left:-1px;
+  border-radius:1px; background:var(--muted); opacity:.45;
+}
+.tick.major::before { top:6px; height:18px; opacity:.8; }
+.tick span {
+  position:absolute; top:31px; left:50%; transform:translateX(-50%); white-space:nowrap;
+  font-size:.7rem; font-weight:700; color:var(--muted); transition: color .2s ease;
+}
+.tick.on span { color:var(--accent-text); }
+.ruler-needle {
+  position:absolute; left:50%; top:3px; width:4px; height:25px; margin-left:-2px;
+  border-radius:2px; background:var(--accent); pointer-events:none;
+}
 .chips { display:grid; grid-template-columns:repeat(4, 1fr); gap:6px; }
 .chips.chips-2 { grid-template-columns:repeat(2, 1fr); }
 .chips button {

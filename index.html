@@ -92,14 +92,18 @@
     <div class="card-row sleep-row">
       <div class="sleep-top">
         <span class="muted-label">Таймер сна</span>
-        <span class="sleep-left" id="sleepLeft"></span>
+        <span class="sleep-value">
+          <span id="sleepValue">Выкл</span>
+          <button class="sleep-off" id="sleepOff" aria-label="Выключить таймер" hidden>×</button>
+        </span>
       </div>
-      <div class="chips" id="sleepChips" role="group" aria-label="Таймер сна">
-        <button data-min="0" aria-pressed="true">Выкл</button>
-        <button data-min="10" aria-pressed="false">10 мин</button>
-        <button data-min="20" aria-pressed="false">20 мин</button>
-        <button data-min="30" aria-pressed="false">30 мин</button>
+      <!-- Линейка: листается пальцем влево-вправо, по центру — выбранное время -->
+      <div class="ruler" id="sleepRuler" tabindex="0" role="slider" aria-label="Таймер сна, минут"
+           aria-valuemin="0" aria-valuemax="120" aria-valuenow="0" aria-valuetext="Выключен">
+        <div class="ruler-scroll" id="rulerScroll"><div class="ruler-ticks" id="rulerTicks"></div></div>
+        <div class="ruler-needle" aria-hidden="true"></div>
       </div>
+      <span class="sleep-left" id="sleepLeft"></span>
     </div>
   </div>
 

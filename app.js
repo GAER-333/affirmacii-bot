@@ -18,7 +18,11 @@
 
   function haptic(kind) {
     try {
-      if (!inTelegram || !tg.HapticFeedback) return;
+      if (!inTelegram || !tg.HapticFeedback) {
+        // Вне Telegram (обычный браузер на Android) — короткий «щелчок» системной вибрацией
+        if (kind === 'select' && navigator.vibrate) navigator.vibrate(4);
+        return;
+      }
       if (kind === 'select') tg.HapticFeedback.selectionChanged();
       else tg.HapticFeedback.impactOccurred(kind || 'light');
     } catch (e) {}
@@ -63,7 +67,11 @@
     voiceVolume: document.getElementById('voiceVolume'),
     speedChips: document.getElementById('speedChips'),
     genderChips: document.getElementById('genderChips'),
-    sleepChips: document.getElementById('sleepChips'),
+    sleepValue: document.getElementById('sleepValue'),
+    sleepOff: document.getElementById('sleepOff'),
+    sleepRuler: document.getElementById('sleepRuler'),
+    rulerScroll: document.getElementById('rulerScroll'),
+    rulerTicks: document.getElementById('rulerTicks'),
     sleepLeft: document.getElementById('sleepLeft'),
     listCard: document.getElementById('listCard'),
     input: document.getElementById('phraseInput'),
@@ -1231,10 +1239,16 @@
     }
   }
 
+  function minutesText(m) { return m ? m + ' мин' : 'Выкл'; }
+
   function renderSleep() {
-    Array.prototype.forEach.call(els.sleepChips.children, function (b) {
-      b.setAttribute('aria-pressed', parseInt(b.getAttribute('data-min'), 10) === sleep.minutes ? 'true' : 'false');
-    });
+    if (!ruler.busy()) {
+      els.sleepValue.textContent = minutesText(sleep.minutes);
+      if (ruler.value !== sleep.minutes) ruler.scrollTo(sleep.minutes, true); // например, таймер сработал
+    }
+    els.sleepOff.hidden = !sleep.minutes;
+    els.sleepRuler.setAttribute('aria-valuenow', sleep.minutes);
+    els.sleepRuler.setAttribute('aria-valuetext', sleep.minutes ? sleep.minutes + ' минут' : 'Выключен');
     if (!sleep.minutes) { els.sleepLeft.textContent = ''; return; }
     var s = Math.ceil(sleep.leftMs / 1000);
     els.sleepLeft.textContent = 'остановится через ' + Math.floor(s / 60) + ':' + pad(s % 60);
@@ -1273,20 +1287,146 @@
     }
   }
 
-  els.sleepChips.addEventListener('click', function (e) {
-    var b = e.target.closest('button');
-    if (!b) return;
+  function setSleepMinutes(m) {
+    if (m === sleep.minutes) return;
     pauseSleepCountdown();
-    sleep.minutes = parseInt(b.getAttribute('data-min'), 10);
-    sleep.leftMs = sleep.minutes * 60000;
-    haptic('select');
+    sleep.minutes = m;
+    sleep.leftMs = m * 60000;
     if (state.mode === 'playing') {
       startSleepCountdown();
       if (!mediaMode()) replanVoice(); // убрать фразы, которые не успеют до таймера, или продлить очередь
       scheduleMusic();
     }
     renderSleep();
-  });
+  }
+
+  // --- Линейка таймера сна ---
+  // Обычная горизонтальная прокрутка с «примагничиванием» к делениям: на телефоне она
+  // сама даёт инерцию и плавную доводку. Деление — 5 минут, от «Выкл» до 2 часов.
+  // На каждом делении — лёгкий «щелчок» вибрацией. Время применяется, когда линейка остановилась.
+  var ruler = (function () {
+    var STEP = 5, MAX = 120, PX = 22; // PX — ширина деления, как в style.css (.tick)
+    var scroller = els.rulerScroll, ticks = [];
+    var value = 0, touching = false, settleId = null, programmatic = false, lastBuzz = 0;
+
+    for (var m = 0; m <= MAX; m += STEP) {
+      var t = document.createElement('div');
+      t.className = 'tick' + (m % 15 === 0 ? ' major' : '');
+      t.setAttribute('data-min', m);
+      if (m % 15 === 0) t.innerHTML = '<span>' + (m ? m : 'Выкл') + '</span>';
+      els.rulerTicks.appendChild(t);
+      ticks.push(t);
+    }
+
+    function valueAtScroll() {
+      return Math.max(0, Math.min(MAX, Math.round(scroller.scrollLeft / PX) * STEP));
+    }
+    function mark(v) {
+      ticks.forEach(function (t) { t.classList.toggle('on', parseInt(t.getAttribute('data-min'), 10) === v); });
+    }
+    function scrollTo(v, smooth) {
+      programmatic = true;
+      value = v;
+      mark(v);
+      scroller.scrollTo({ left: v / STEP * PX, behavior: smooth ? 'smooth' : 'auto' });
+      clearTimeout(settleId);
+      settleId = setTimeout(settle, smooth ? 600 : 50);
+    }
+    function settle() {
+      settleId = null;
+      if (touching) { settleId = setTimeout(settle, 150); return; }
+      var wasProgrammatic = programmatic;
+      programmatic = false;
+      if (!wasProgrammatic) setSleepMinutes(value);
+      else renderSleep();
+    }
+
+    scroller.addEventListener('scroll', function () {
+      var v = valueAtScroll();
+      if (v !== value) {
+        value = v;
+        mark(v);
+        if (!programmatic) {
+          els.sleepValue.textContent = minutesText(v);
+          var now = Date.now();
+          if (now - lastBuzz > 25) { lastBuzz = now; haptic('select'); }
+        }
+      }
+      if (!programmatic) {
+        clearTimeout(settleId);
+        settleId = setTimeout(settle, 160);
+      }
+    }, { passive: true });
+
+    scroller.addEventListener('touchstart', function () { touching = true; programmatic = false; }, { passive: true });
+    scroller.addEventListener('touchend', function () { touching = false; }, { passive: true });
+    scroller.addEventListener('touchcancel', function () { touching = false; }, { passive: true });
+
+    // Мышью (Telegram на компьютере): тянуть линейку, крутить колёсико, нажать на деление
+    var drag = null;
+    scroller.addEventListener('pointerdown', function (e) {
+      if (e.pointerType !== 'mouse' || e.button !== 0) return;
+      drag = { x: e.clientX, left: scroller.scrollLeft, moved: false };
+      touching = true; programmatic = false;
+      scroller.classList.add('dragging');
+    });
+    window.addEventListener('pointermove', function (e) {
+      if (!drag) return;
+      if (Math.abs(e.clientX - drag.x) > 3) drag.moved = true;
+      scroller.scrollLeft = drag.left - (e.clientX - drag.x);
+    });
+    var suppressClick = false;
+    window.addEventListener('pointerup', function () {
+      if (!drag) return;
+      var moved = drag.moved;
+      drag = null;
+      touching = false;
+      scroller.classList.remove('dragging');
+      if (!moved) return;
+      suppressClick = true; // после перетаскивания браузер пришлёт «нажатие» — его пропускаем
+      setTimeout(function () { suppressClick = false; }, 0);
+      // Довести до ближайшего деления и применить
+      var v = valueAtScroll();
+      scroller.scrollTo({ left: v / STEP * PX, behavior: 'smooth' });
+      clearTimeout(settleId);
+      settleId = setTimeout(settle, 400);
+    });
+    scroller.addEventListener('wheel', function (e) {
+      var d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+      if (!d) return;
+      e.preventDefault();
+      pick(Math.max(0, Math.min(MAX, value + (d > 0 ? STEP : -STEP))));
+    }, { passive: false });
+    scroller.addEventListener('click', function (e) {
+      var t = e.target.closest('.tick');
+      if (t && !suppressClick) pick(parseInt(t.getAttribute('data-min'), 10));
+    });
+    els.sleepRuler.addEventListener('keydown', function (e) {
+      var d = e.key === 'ArrowRight' ? STEP : e.key === 'ArrowLeft' ? -STEP : 0;
+      if (!d) return;
+      e.preventDefault();
+      pick(Math.max(0, Math.min(MAX, value + d)));
+    });
+
+    // Выбрать значение нажатием: щелчок, линейка плавно едет, время применяется сразу
+    function pick(v) {
+      if (v === value && v === sleep.minutes) return;
+      haptic('select');
+      scrollTo(v, true);
+      setSleepMinutes(v);
+      els.sleepValue.textContent = minutesText(v);
+    }
+
+    return {
+      get value() { return value; },
+      busy: function () { return touching || (settleId !== null && !programmatic); },
+      scrollTo: scrollTo,
+      pick: pick,
+    };
+  })();
+
+  // Крестик — выключить таймер одним нажатием
+  els.sleepOff.addEventListener('click', function () { ruler.pick(0); });
 
   // --- Работа в фоне и экран блокировки ---
   // Media Session — название фразы и кнопки «пауза / вперёд / назад» на экране блокировки.

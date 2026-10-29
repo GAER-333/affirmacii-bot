@@ -20,7 +20,14 @@
     try {
       if (!inTelegram || !tg.HapticFeedback) {
         // Вне Telegram (обычный браузер на Android) — короткий «щелчок» системной вибрацией
-        if (kind === 'select' && navigator.vibrate) navigator.vibrate(4);
+        if ((kind === 'select' || kind === 'tick') && navigator.vibrate) navigator.vibrate(kind === 'tick' ? 12 : 4);
+        return;
+      }
+      // 'tick' — щелчок линейки. На iPhone «щелчок выбора» отчётливый, а на Android Telegram
+      // делает его еле заметным — там вместо него короткий толчок средней силы.
+      if (kind === 'tick') {
+        if (/Android/i.test(navigator.userAgent)) tg.HapticFeedback.impactOccurred('medium');
+        else tg.HapticFeedback.selectionChanged();
         return;
       }
       if (kind === 'select') tg.HapticFeedback.selectionChanged();
@@ -1349,7 +1356,7 @@
         if (!programmatic) {
           els.sleepValue.textContent = minutesText(v);
           var now = Date.now();
-          if (now - lastBuzz > 25) { lastBuzz = now; haptic('select'); }
+          if (now - lastBuzz > 35) { lastBuzz = now; haptic('tick'); }
         }
       }
       if (!programmatic) {
@@ -1411,7 +1418,7 @@
     // Выбрать значение нажатием: щелчок, линейка плавно едет, время применяется сразу
     function pick(v) {
       if (v === value && v === sleep.minutes) return;
-      haptic('select');
+      haptic('tick');
       scrollTo(v, true);
       setSleepMinutes(v);
       els.sleepValue.textContent = minutesText(v);

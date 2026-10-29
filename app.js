@@ -16,18 +16,35 @@
     try { if (tg.isVersionAtLeast('7.7')) tg.disableVerticalSwipes(); } catch (e) {}
   }
 
+  // Вид «щелчка» линейки. Временно выбирается кнопками под линейкой (подбираем на Android):
+  // light / medium / heavy / rigid — встроенная вибрация Telegram, vib10 / vib25 — вибромотор
+  // телефона напрямую (10 и 25 миллисекунд).
+  var TICK_STYLES = ['light', 'medium', 'heavy', 'rigid', 'vib10', 'vib25'];
+  var tickStyle = (function () {
+    try { var v = localStorage.getItem('affirmations-tick'); if (TICK_STYLES.indexOf(v) >= 0) return v; } catch (e) {}
+    return 'medium';
+  })();
+  var vibrateWorks = null; // сработал ли вибромотор напрямую (для подсказки под кнопками)
+
+  function tick() {
+    if (tickStyle.indexOf('vib') === 0) {
+      vibrateWorks = !!(navigator.vibrate && navigator.vibrate(tickStyle === 'vib10' ? 10 : 25));
+      return;
+    }
+    if (!/Android/i.test(navigator.userAgent) && inTelegram && tg.HapticFeedback) {
+      tg.HapticFeedback.selectionChanged(); // на iPhone «щелчок выбора» и так отчётливый
+      return;
+    }
+    if (inTelegram && tg.HapticFeedback) tg.HapticFeedback.impactOccurred(tickStyle);
+    else if (navigator.vibrate) navigator.vibrate(10);
+  }
+
   function haptic(kind) {
     try {
+      if (kind === 'tick') { tick(); return; }
       if (!inTelegram || !tg.HapticFeedback) {
         // Вне Telegram (обычный браузер на Android) — короткий «щелчок» системной вибрацией
-        if ((kind === 'select' || kind === 'tick') && navigator.vibrate) navigator.vibrate(kind === 'tick' ? 12 : 4);
-        return;
-      }
-      // 'tick' — щелчок линейки. На iPhone «щелчок выбора» отчётливый, а на Android Telegram
-      // делает его еле заметным — там вместо него короткий толчок средней силы.
-      if (kind === 'tick') {
-        if (/Android/i.test(navigator.userAgent)) tg.HapticFeedback.impactOccurred('medium');
-        else tg.HapticFeedback.selectionChanged();
+        if (kind === 'select' && navigator.vibrate) navigator.vibrate(4);
         return;
       }
       if (kind === 'select') tg.HapticFeedback.selectionChanged();
@@ -1430,6 +1447,28 @@
       scrollTo: scrollTo,
       pick: pick,
     };
+  })();
+
+  // Временно: кнопки подбора вибрации — нажали, почувствовали «тик», линейка вибрирует так же
+  (function () {
+    var box = document.getElementById('tickTest'), note = document.getElementById('tickNote');
+    if (!box) return;
+    function render() {
+      Array.prototype.forEach.call(box.querySelectorAll('button'), function (b) {
+        b.setAttribute('aria-pressed', b.getAttribute('data-tick') === tickStyle ? 'true' : 'false');
+      });
+      note.textContent = tickStyle.indexOf('vib') === 0 && vibrateWorks === false ? 'Мотор напрямую в Telegram недоступен' : '';
+    }
+    box.addEventListener('click', function (e) {
+      var b = e.target.closest('button');
+      if (!b) return;
+      tickStyle = b.getAttribute('data-tick');
+      try { localStorage.setItem('affirmations-tick', tickStyle); } catch (err) {}
+      tick();
+      setTimeout(function () { tick(); render(); }, 180); // два «тика» подряд — так легче почувствовать
+      render();
+    });
+    render();
   })();
 
   // Крестик — выключить таймер одним нажатием

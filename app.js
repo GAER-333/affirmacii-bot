@@ -138,11 +138,12 @@
         if (err || !value || state.mode !== 'stopped') return;
         parseCustom(value);
         renderSet(); renderPlayback();
+        ensureCustom();
       });
     } catch (e) {}
   }
 
-  // Плейлист текущего времени суток: сначала готовые фразы (с mp3), потом свои (голос устройства).
+  // Плейлист текущего времени суток: сначала готовые фразы (с mp3), потом свои (озвучка Яндекса).
   // srcs — файлы озвучки по порядку предпочтения: сначала выбранный голос, потом другой.
   function playlist() {
     var t = state.time;
@@ -161,7 +162,7 @@
     els.input.value = '';
     haptic('medium');
     persistCustom(); renderSet(); renderPlayback();
-    replanVoice(); // новая фраза войдёт в очередь, если сейчас играет
+    ensureCustom(); // озвучка голосом диктора; в очередь фраза войдёт, когда будет готова
   }
   els.addBtn.addEventListener('click', addPhrase);
   els.input.addEventListener('keydown', function (e) { if (e.key === 'Enter') addPhrase(); });
@@ -173,6 +174,11 @@
   });
 
   // --- Отрисовка ---
+  function tagHtml(item) {
+    var l = customLabel(item);
+    return '<span class="' + l.cls + '">' + l.text + '</span>';
+  }
+
   function renderSet() {
     var set = AFFIRMATIONS[state.time];
     var items = playlist();
@@ -183,7 +189,7 @@
     els.listCard.innerHTML = items.map(function (item, i) {
       return '<div class="list-row" role="button" tabindex="0" data-idx="' + i + '">' +
         '<span class="num">' + pad(i + 1) + '</span>' +
-        '<span class="text">' + escapeHtml(item.text) + (item.custom ? '<span class="tag">моя</span>' : '') + '</span>' +
+        '<span class="text">' + escapeHtml(item.text) + (item.custom ? tagHtml(item) : '') + '</span>' +
         (item.custom ? '<button class="remove-btn" data-ci="' + item.ci + '" aria-label="Удалить фразу">×</button>' : '') +
         '</div>';
     }).join('');
@@ -260,6 +266,7 @@
     renderSet();
     renderPlayback();
     prefetchMusic();
+    ensureCustom();
   }
 
   // Заранее качаем первый трек и фразы текущего времени суток — к нажатию «Слушать» всё уже готово
@@ -426,8 +433,10 @@
     return pacedVoice[key];
   }
 
-  // Звук для фразы: выбранный голос → другой голос → null (тогда читает голос устройства)
+  // Звук для фразы: выбранный голос → другой голос → null (тогда читает голос устройства).
+  // Своя фраза — озвучка Яндекса (см. ниже); 'skip' — ещё озвучивается, пока пропускаем.
   function resolveVoice(item, rate) {
+    if (item.custom) return customVoice(item, rate);
     var srcs = item.srcs.filter(function (s) { return !missing[s]; }), k = 0;
     var attempt = function () {
       if (k >= srcs.length) return Promise.resolve(null);
@@ -437,6 +446,155 @@
       }, function () { missing[src] = true; return attempt(); });
     };
     return attempt();
+  }
+
+  // --- Свои фразы голосом диктора (Яндекс SpeechKit через нашу облачную функцию) ---
+  // Фраза озвучивается один раз — когда её добавили (или когда выбрали другой голос). Звук приходит
+  // от функции (server/index.js) и запоминается на устройстве (IndexedDB), дальше это обычный звук,
+  // как у готовых фраз: входит в очередь и в дорожку Android, играет в фоне.
+  // Пока фраза озвучивается — её пропускаем. Если озвучить не вышло (нет связи, лимит, приложение
+  // открыто не в Telegram) — читает голос устройства, как раньше.
+  var TTS_FUNCTION_URL = 'https://functions.yandexcloud.net/d4ejo8j5231iiui7asuk';
+  var customState = {};    // ключ → { status: 'loading' | 'ready' | 'error', code, data, promise }
+  var decodedCustom = {};  // ключ|темп → Promise со звуком
+  var netChain = Promise.resolve(); // запросы к функции идут по одному
+
+  var idb = (function () {
+    var dbp = null;
+    function open() {
+      if (!dbp) {
+        dbp = new Promise(function (resolve, reject) {
+          try {
+            var r = indexedDB.open('affirmacii', 1);
+            r.onupgradeneeded = function () { r.result.createObjectStore('tts'); };
+            r.onsuccess = function () { resolve(r.result); };
+            r.onerror = function () { reject(r.error); };
+          } catch (e) { reject(e); }
+        });
+      }
+      return dbp;
+    }
+    return {
+      get: function (key) {
+        return open().then(function (db) {
+          return new Promise(function (resolve) {
+            var q = db.transaction('tts').objectStore('tts').get(key);
+            q.onsuccess = function () { resolve(q.result || null); };
+            q.onerror = function () { resolve(null); };
+          });
+        }).catch(function () { return null; });
+      },
+      put: function (key, value) {
+        return open().then(function (db) { db.transaction('tts', 'readwrite').objectStore('tts').put(value, key); }).catch(function () {});
+      },
+    };
+  })();
+
+  function cleanPhrase(text) { return String(text).replace(/\s+/g, ' ').trim(); }
+  function customKey(text, gender, time) { return gender + '|' + time + '|' + cleanPhrase(text); }
+
+  function askFunction(text, gender, time) {
+    var run = function () {
+      if (!inTelegram || !tg.initData) return Promise.reject({ code: 'not_telegram' });
+      // text/plain — «простой» запрос: браузер не делает лишний предварительный запрос
+      return fetch(TTS_FUNCTION_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+        body: JSON.stringify({ initData: tg.initData, text: cleanPhrase(text), gender: gender, time: time }),
+      }).then(function (r) {
+        return r.json().catch(function () { return {}; }).then(function (j) {
+          if (!r.ok || !j.audio) throw { code: j.error || 'http_' + r.status, limit: j.limit };
+          var bin = atob(j.audio), bytes = new Uint8Array(bin.length);
+          for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+          return bytes.buffer;
+        });
+      }, function () { throw { code: 'network' }; });
+    };
+    var p = netChain.then(run);
+    netChain = p.catch(function () {});
+    return p;
+  }
+
+  // Озвучить (или достать из памяти устройства) одну свою фразу
+  function fetchCustom(text, gender, time) {
+    var key = customKey(text, gender, time), st = customState[key];
+    if (st && (st.status === 'ready' || st.status === 'loading')) return st.promise;
+    st = customState[key] = { status: 'loading' };
+    st.promise = idb.get(key).then(function (data) {
+      if (data) return data;
+      return askFunction(text, gender, time).then(function (buf) { idb.put(key, buf); return buf; });
+    }).then(function (data) {
+      st.status = 'ready';
+      st.data = data;
+      customChanged();
+      return data;
+    }, function (err) {
+      st.status = 'error';
+      st.code = (err && err.code) || 'network';
+      customFailed(st.code, err && err.limit);
+      customChanged();
+      throw err;
+    });
+    return st.promise;
+  }
+
+  // Озвучить все свои фразы текущего времени суток выбранным голосом (уже готовые — пропускаются)
+  function ensureCustom() {
+    var g = voiceGender, t = state.time, started = false;
+    custom[t].forEach(function (text) {
+      var st = customState[customKey(text, g, t)];
+      if (st && (st.status === 'ready' || st.status === 'loading')) return;
+      fetchCustom(text, g, t).catch(function () {});
+      started = true;
+    });
+    if (started) { renderSet(); renderPlayback(); }
+  }
+
+  // Готовность изменилась: обновить метки и, если играет, включить фразу в очередь
+  var customReplanId = null;
+  function customChanged() {
+    renderSet();
+    renderPlayback();
+    clearTimeout(customReplanId);
+    customReplanId = setTimeout(function () { if (state.mode === 'playing') replanVoice(); }, 400);
+  }
+
+  var customToldCodes = {};
+  function customFailed(code, limit) {
+    if (customToldCodes[code]) return; // одно и то же сообщение не повторяем
+    customToldCodes[code] = true;
+    var msg = {
+      not_telegram: 'Свои фразы озвучиваются голосом диктора, когда приложение открыто в Telegram. Пока их читает голос устройства.',
+      limit_user: 'Сегодня уже озвучено ' + (limit || 40) + ' своих фраз — остальные озвучатся завтра.',
+      limit_total: 'Озвучка своих фраз сейчас недоступна, попробуйте позже.',
+      too_long: 'Фраза слишком длинная — сократите до 200 символов.',
+    }[code] || 'Не получилось озвучить фразу — проверьте интернет. Попробуем снова при следующем запуске.';
+    els.statusMsg.textContent = msg;
+  }
+
+  // Звук своей фразы для воспроизведения: готов — звук, озвучивается — 'skip', не вышло — null
+  function customVoice(item, rate) {
+    var g = voiceGender, t = state.time, key = customKey(item.text, g, t), st = customState[key];
+    if (!st) { fetchCustom(item.text, g, t).catch(function () {}); return Promise.resolve('skip'); }
+    if (st.status === 'loading') return Promise.resolve('skip');
+    if (st.status !== 'ready') return Promise.resolve(null);
+    var dk = key + '|' + rate;
+    if (!decodedCustom[dk]) {
+      decodedCustom[dk] = audioCtx().decodeAudioData(st.data.slice(0)).then(function (b) {
+        return rate === 1 ? b : stretchPauses(b, rate);
+      });
+    }
+    // Голос тот же, что у готовых фраз этого набора, — и поправка громкости та же
+    var level = (window.VOICE_LEVELS || {})[g + '/' + t] || 0;
+    return decodedCustom[dk].then(function (b) { return { buffer: b, gain: Math.pow(10, level / 20) }; },
+      function () { delete decodedCustom[dk]; return null; });
+  }
+
+  function customLabel(item) {
+    var st = customState[customKey(item.text, voiceGender, state.time)];
+    if (st && st.status === 'loading') return { text: 'моя · озвучивается…', cls: 'tag pending' };
+    if (st && st.status === 'error') return { text: 'моя · не озвучена', cls: 'tag warn' };
+    return { text: 'моя', cls: 'tag' };
   }
   function stretchPauses(buf, rate) {
     var sr = buf.sampleRate, n = buf.length, data = buf.getChannelData(0);
@@ -577,7 +735,7 @@
   function loadVoiceItem(q, k) {
     if (!q.waits[k]) {
       var item = q.items[k];
-      q.waits[k] = (item.custom ? Promise.resolve(null) : resolveVoice(item, q.rate))
+      q.waits[k] = resolveVoice(item, q.rate)
         .then(function (v) { q.ready[k] = v; return v; });
     }
     return q.waits[k];
@@ -592,6 +750,7 @@
     if (!q || state.mode !== 'playing' || q.ttsWait) return;
     var now = audioCtx().currentTime, limit = horizonEnd();
     if (q.at < now + 0.05) q.at = now + 0.05; // очередь кончилась, пока приложение спало
+    var skipped = 0;
     while (q.at < limit) {
       var k = q.next;
       if (q.ready[k] === undefined) {
@@ -599,6 +758,12 @@
         break;
       }
       var v = q.ready[k];
+      if (v === 'skip') { // своя фраза ещё озвучивается — пропускаем, войдёт в очередь, когда будет готова
+        q.next = (k + 1) % q.items.length;
+        if (++skipped >= q.items.length) break;
+        continue;
+      }
+      skipped = 0;
       if (!v) { scheduleTts(q, k); break; }
       var offset = Math.min(q.offset, v.buffer.duration), dur = v.buffer.duration - offset;
       if (sleepEndAt && q.at + dur > sleepEndAt) break; // не успеет дозвучать до таймера сна
@@ -726,7 +891,11 @@
   }
 
   function mediaKey(items) {
-    return state.time + '|' + voiceGender + '|' + voiceRate + '|' + items.map(function (it) { return it.text; }).join('§');
+    return state.time + '|' + voiceGender + '|' + voiceRate + '|' + items.map(function (it) {
+      if (!it.custom) return it.text;
+      var st = customState[customKey(it.text, voiceGender, state.time)];
+      return it.text + (st && st.status === 'ready' ? '+' : '-'); // готовность своих фраз — тоже часть дорожки
+    }).join('§');
   }
 
   // Склеиваем фразы: фраза, пауза, фраза, пауза… Громкость наборов выравниваем сразу
@@ -735,7 +904,7 @@
     if (mv && mv.key === key) return Promise.resolve(mv);
     var rate = voiceRate;
     return Promise.all(items.map(function (it) {
-      return it.custom ? Promise.resolve(null) : resolveVoice(it, rate);
+      return resolveVoice(it, rate).then(function (v) { return v && v.buffer ? v : null; });
     })).then(function (vs) {
       var sr = 0;
       vs.forEach(function (v) { if (v && !sr) sr = v.buffer.sampleRate; });
@@ -1075,6 +1244,8 @@
     savePref('affirmations-voice-gender', voiceGender);
     haptic('select');
     applyVoiceGender();
+    ensureCustom(); // свои фразы — озвучить и этим голосом
+    renderSet(); renderPlayback();
     replanVoice();
   });
 
@@ -1145,6 +1316,7 @@
     var wasPlaying = state.mode === 'playing';
     state.mode = 'playing';
     if (!wasPlaying) { haptic('medium'); startAudioEngine(); startSleepCountdown(); }
+    ensureCustom(); // повторить озвучку, если раньше не вышло
     startVoice(i);
   }
 
@@ -1496,4 +1668,5 @@
   renderPlayback();
   renderSleep();
   prefetchMusic();
+  ensureCustom();
 })();

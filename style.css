@@ -154,6 +154,9 @@ p.sub { color:var(--muted); font-size:.88rem; text-align:center; line-height:1.5
   display:inline-block; margin-left:6px; padding:1px 7px; border-radius:999px; vertical-align:1px;
   font-size:.66rem; font-weight:700; color:var(--accent-text); border:1px solid var(--border);
 }
+.list-row .tag.pending { animation: tagPulse 1.4s ease-in-out infinite; }
+.list-row .tag.warn { opacity:.55; }
+@keyframes tagPulse { 50% { opacity:.35; } }
 .remove-btn {
   align-self:center; flex-shrink:0; width:28px; height:28px; border-radius:50%;
   border:none; background:none; color:var(--muted); font-size:18px; line-height:1; cursor:pointer;

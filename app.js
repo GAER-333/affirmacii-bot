@@ -78,7 +78,8 @@
     musicVolume: document.getElementById('musicVolume'),
     voiceVolume: document.getElementById('voiceVolume'),
     speedChips: document.getElementById('speedChips'),
-    orderChips: document.getElementById('orderChips'),
+    orderToggle: document.getElementById('orderToggle'),
+    orderLabel: document.getElementById('orderLabel'),
     genderChips: document.getElementById('genderChips'),
     sleepValue: document.getElementById('sleepValue'),
     sleepOff: document.getElementById('sleepOff'),
@@ -1398,25 +1399,24 @@
     replanVoice();
   });
 
-  // Порядок фраз: по списку / вперемешку
-  function applyShuffleChips() {
-    Array.prototype.forEach.call(els.orderChips.children, function (b) {
-      b.setAttribute('aria-pressed', (b.getAttribute('data-shuffle') === '1') === shuffleOn ? 'true' : 'false');
-    });
+  // Порядок фраз: одна кнопка над списком — «По порядку» ↔ «Вперемешку»
+  function applyShuffleToggle() {
+    els.orderToggle.setAttribute('aria-pressed', shuffleOn ? 'true' : 'false');
+    els.orderLabel.textContent = shuffleOn ? 'Вперемешку' : 'По порядку';
   }
-  applyShuffleChips();
-  els.orderChips.addEventListener('click', function (e) {
-    var b = e.target.closest('button');
-    if (!b) return;
-    var on = b.getAttribute('data-shuffle') === '1';
-    if (on === shuffleOn) return;
+  applyShuffleToggle();
+  els.orderToggle.addEventListener('click', function () {
+    var on = !shuffleOn;
     haptic('select');
     changeOrder(function () {
       shuffleOn = on;
       savePref('affirmations-shuffle', on ? '1' : '0');
       if (on) reshuffle();
     });
-    applyShuffleChips();
+    applyShuffleToggle();
+    els.orderToggle.classList.remove('flip');
+    void els.orderToggle.offsetWidth; // перезапуск анимации
+    els.orderToggle.classList.add('flip');
   });
 
   // Голос диктора: женский / мужской. Применяется со следующей фразы.

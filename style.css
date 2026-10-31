@@ -146,6 +146,24 @@ p.sub { color:var(--muted); font-size:.88rem; text-align:center; line-height:1.5
   background:none; color:var(--text); font-family:inherit; cursor:pointer;
 }
 .list-row:last-child { border-bottom:none; }
+
+/* Заголовок списка с переключателем порядка */
+.list-head { width:100%; display:flex; align-items:center; justify-content:space-between; margin:4px 0 8px; padding:0 4px; }
+.list-title { color:var(--muted); font-size:.85rem; font-weight:700; }
+.order-toggle {
+  display:flex; align-items:center; gap:6px; padding:6px 12px 6px 10px; border-radius:999px; cursor:pointer;
+  border:1px solid var(--border); background:none; color:var(--muted);
+  font-family:inherit; font-size:.8rem; font-weight:700;
+  transition: background-color .25s ease, color .25s ease, border-color .25s ease;
+}
+.order-toggle svg { width:16px; height:16px; fill:none; stroke:currentColor; stroke-width:2; stroke-linecap:round; stroke-linejoin:round; }
+.order-toggle .ic-shuffle { display:none; }
+.order-toggle[aria-pressed="true"] { background:var(--accent); border-color:var(--accent); color:var(--on-accent); }
+.order-toggle[aria-pressed="true"] .ic-shuffle { display:block; }
+.order-toggle[aria-pressed="true"] .ic-list { display:none; }
+.order-toggle:active { transform:scale(.96); }
+.order-toggle.flip svg { animation: orderFlip .35s ease; }
+@keyframes orderFlip { from { transform: rotate(-90deg) scale(.6); opacity:0; } to { transform:none; opacity:1; } }
 .list-row .num { color:var(--muted); font-size:.75rem; font-weight:700; min-width:2ch; }
 .list-row .text { font-size:.9rem; line-height:1.4; flex:1; overflow-wrap:anywhere; }
 .list-row.live .text, .list-row.live .num { color:var(--accent-text); }

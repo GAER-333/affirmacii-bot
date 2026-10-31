@@ -90,13 +90,6 @@
       </div>
     </div>
     <div class="card-row sleep-row">
-      <span class="muted-label">Порядок фраз</span>
-      <div class="chips chips-2" id="orderChips" role="group" aria-label="Порядок фраз">
-        <button data-shuffle="0" aria-pressed="true">По списку</button>
-        <button data-shuffle="1" aria-pressed="false">Вперемешку</button>
-      </div>
-    </div>
-    <div class="card-row sleep-row">
       <div class="sleep-top">
         <span class="muted-label">Таймер сна</span>
         <span class="sleep-value">
@@ -114,6 +107,15 @@
     </div>
   </div>
 
+  <!-- Заголовок списка: переключатель порядка фраз -->
+  <div class="list-head">
+    <span class="list-title">Фразы</span>
+    <button class="order-toggle" id="orderToggle" aria-pressed="false" aria-label="Порядок фраз">
+      <svg class="ic-list" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"/></svg>
+      <svg class="ic-shuffle" viewBox="0 0 24 24" aria-hidden="true"><path d="M16 3h5v5M4 20 21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg>
+      <span id="orderLabel">По порядку</span>
+    </button>
+  </div>
   <div class="card" id="listCard"></div>
 
   <!-- Свои фразы -->

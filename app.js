@@ -78,6 +78,7 @@
     musicVolume: document.getElementById('musicVolume'),
     voiceVolume: document.getElementById('voiceVolume'),
     speedChips: document.getElementById('speedChips'),
+    orderChips: document.getElementById('orderChips'),
     genderChips: document.getElementById('genderChips'),
     sleepValue: document.getElementById('sleepValue'),
     sleepOff: document.getElementById('sleepOff'),
@@ -173,7 +174,6 @@
       });
     } catch (e) {}
   }
-  function isHidden(i) { return hidden[state.time].indexOf(i) >= 0; }
   function toggleHidden(i) {
     var list = hidden[state.time], at = list.indexOf(i);
     if (at >= 0) list.splice(at, 1); else list.push(i);
@@ -201,11 +201,58 @@
   function playlist() {
     var t = state.time;
     var order = [voiceGender].concat(VOICES.filter(function (v) { return v !== voiceGender; }));
-    return AFFIRMATIONS[t].phrases.map(function (p, i) {
-      return { text: p, srcs: order.map(function (g) { return voicePath(g, t, i); }), custom: false, hidden: hidden[t].indexOf(i) >= 0 };
+    var items = AFFIRMATIONS[t].phrases.map(function (p, i) {
+      return { text: p, srcs: order.map(function (g) { return voicePath(g, t, i); }), custom: false, pi: i, hidden: hidden[t].indexOf(i) >= 0 };
     }).concat(custom[t].map(function (p, i) {
       return { text: p, srcs: [], custom: true, ci: i };
     }));
+    return shuffleOn ? arrange(items, t) : items;
+  }
+
+  // --- Порядок фраз: по списку или вперемешку ---
+  // «Вперемешку» просто переставляет фразы в самом списке, а играет приложение его как обычно — сверху
+  // вниз. Сам механизм воспроизведения (очередь, фон, дорожка Android) не меняется.
+  // Новый случайный порядок — при каждом нажатии «Слушать» с начала и при включении «Вперемешку».
+  var ORDER_KEY = 'affirmations-order';
+  var shuffleOn = loadPref('affirmations-shuffle', '0') === '1';
+  var shuffleOrder = {};
+  try { shuffleOrder = JSON.parse(localStorage.getItem(ORDER_KEY) || '{}') || {}; } catch (e) { shuffleOrder = {}; }
+  function itemKey(it) { return it.custom ? 'c:' + it.text : 'p:' + it.pi; }
+  // Расставить фразы по сохранённому порядку; новые (например, только что добавленные) — в конец
+  function arrange(items, t) {
+    var keys = shuffleOrder[t];
+    if (!keys) return items;
+    var pos = {};
+    keys.forEach(function (k, n) { pos[k] = n; });
+    return items.map(function (it, n) { return { it: it, n: n }; }).sort(function (a, b) {
+      var pa = pos[itemKey(a.it)], pb = pos[itemKey(b.it)];
+      if (pa === undefined && pb === undefined) return a.n - b.n;
+      if (pa === undefined) return 1;
+      if (pb === undefined) return -1;
+      return pa - pb;
+    }).map(function (x) { return x.it; });
+  }
+  function reshuffle() {
+    var t = state.time, was = shuffleOn;
+    shuffleOn = false;
+    var keys = playlist().map(itemKey); // естественный порядок
+    shuffleOn = was;
+    for (var n = keys.length - 1; n > 0; n--) { var j = Math.floor(Math.random() * (n + 1)); var tmp = keys[n]; keys[n] = keys[j]; keys[j] = tmp; }
+    shuffleOrder[t] = keys;
+    try { localStorage.setItem(ORDER_KEY, JSON.stringify(shuffleOrder)); } catch (e) {}
+  }
+  // Поменять порядок, не теряя текущую фразу: если играет — она начнётся заново уже на новом месте
+  function changeOrder(fn) {
+    var before = playlist();
+    var curKey = state.currentIndex !== null && before[state.currentIndex] ? itemKey(before[state.currentIndex]) : null;
+    fn();
+    var after = playlist(), ni = null;
+    if (curKey) after.forEach(function (it, n) { if (itemKey(it) === curKey) ni = n; });
+    renderSet();
+    if (state.mode === 'playing' && ni !== null) { startVoice(ni); return; }
+    state.currentIndex = ni;
+    resumeFrom = null;
+    renderPlayback();
   }
 
   function addPhrase() {
@@ -248,7 +295,7 @@
         '<span class="num">' + pad(i + 1) + '</span>' +
         '<span class="text">' + escapeHtml(item.text) + (item.custom ? tagHtml(item) : '') +
           (item.hidden ? '<span class="tag tag-muted">скрыта</span>' : '') + '</span>' +
-        (item.custom ? '' : '<button class="hide-btn" data-idx="' + i + '" aria-label="' +
+        (item.custom ? '' : '<button class="hide-btn" data-pi="' + item.pi + '" aria-label="' +
           (item.hidden ? 'Вернуть фразу' : 'Скрыть фразу') + '">' + (item.hidden ? EYE : EYE_OFF) + '</button>') +
         (item.custom ? '<button class="edit-btn" data-ci="' + item.ci + '" aria-label="Изменить фразу">' + PENCIL + '</button>' +
           '<button class="remove-btn" data-ci="' + item.ci + '" aria-label="Удалить фразу">×</button>' : '') +
@@ -291,9 +338,9 @@
   els.listCard.addEventListener('click', function (e) {
     if (e.target.closest('.edit-input')) return; // нажатие внутри поля правки — не включать фразу
     var hideBtn = e.target.closest('.hide-btn');
-    if (hideBtn) { toggleHidden(parseInt(hideBtn.getAttribute('data-idx'), 10)); return; }
+    if (hideBtn) { toggleHidden(parseInt(hideBtn.getAttribute('data-pi'), 10)); return; }
     var hiddenRow = e.target.closest('.list-row.is-hidden');
-    if (hiddenRow) { toggleHidden(parseInt(hiddenRow.getAttribute('data-idx'), 10)); return; }
+    if (hiddenRow) { toggleHidden(playlist()[parseInt(hiddenRow.getAttribute('data-idx'), 10)].pi); return; }
     var edit = e.target.closest('.edit-btn');
     if (edit) { startEdit(edit.closest('.list-row'), parseInt(edit.getAttribute('data-ci'), 10)); return; }
     var remove = e.target.closest('.remove-btn');
@@ -1351,6 +1398,27 @@
     replanVoice();
   });
 
+  // Порядок фраз: по списку / вперемешку
+  function applyShuffleChips() {
+    Array.prototype.forEach.call(els.orderChips.children, function (b) {
+      b.setAttribute('aria-pressed', (b.getAttribute('data-shuffle') === '1') === shuffleOn ? 'true' : 'false');
+    });
+  }
+  applyShuffleChips();
+  els.orderChips.addEventListener('click', function (e) {
+    var b = e.target.closest('button');
+    if (!b) return;
+    var on = b.getAttribute('data-shuffle') === '1';
+    if (on === shuffleOn) return;
+    haptic('select');
+    changeOrder(function () {
+      shuffleOn = on;
+      savePref('affirmations-shuffle', on ? '1' : '0');
+      if (on) reshuffle();
+    });
+    applyShuffleChips();
+  });
+
   // Голос диктора: женский / мужской. Применяется со следующей фразы.
   function applyVoiceGender() {
     Array.prototype.forEach.call(els.genderChips.children, function (b) {
@@ -1520,7 +1588,10 @@
   function togglePlay() {
     if (state.mode === 'playing') pausePlayback();
     else if (state.mode === 'paused') resumePlayback();
-    else playFrom(0);
+    else {
+      if (shuffleOn) { reshuffle(); renderSet(); } // каждый раз — новый порядок
+      playFrom(0);
+    }
   }
 
   els.playBtn.addEventListener('click', togglePlay);

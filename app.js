@@ -611,24 +611,27 @@
     var first = 0; while (first < frames && level[first] < quiet) first++;
     var last = frames - 1; while (last > first && level[last] < quiet) last--;
 
-    // Паузы внутри фразы: от 70 мс тишины подряд. Короче — это обычно не пауза, а смычка
-    // на «т», «п», «к»; если её растянуть, слово прозвучит с запинкой.
+    // Паузы внутри фразы: от 130 мс тишины подряд — так длятся паузы между словами и на запятых.
+    // Короче — это обычно смычка внутри слова (тишина перед «т», «п», «к»): если её растянуть,
+    // слово оборвётся на половине. Голоса Яндекса говорят слитно, таких смычек у них много.
     // Тишину вставляем в самую тихую точку паузы.
     var gaps = [];
     for (var g = first; g <= last; g++) {
       if (level[g] >= quiet) continue;
       var from = g, quietest = g;
       while (g <= last && level[g] < quiet) { if (level[g] < level[quietest]) quietest = g; g++; }
-      if (g - from >= 7) gaps.push({ at: quietest * frame + (frame >> 1), len: (g - from) * frame });
+      if (g - from >= 13) gaps.push({ at: quietest * frame + (frame >> 1), len: (g - from) * frame });
     }
     if (!gaps.length) return buf;
 
-    // Сколько тишины добавить (минус — убрать), делим между паузами пропорционально их длине
+    // Сколько тишины добавить (минус — убрать), делим между паузами пропорционально их длине.
+    // Каждую паузу удлиняем не больше чем на 80% её длины и не больше 0,3 с — иначе слышен провал.
+    // Остальное замедление дают паузы между фразами (они при медленном темпе длиннее).
     var gapTotal = 0; gaps.forEach(function (p) { gapTotal += p.len; });
     var change = (last - first) * frame * (1 / rate - 1);
     var total = n;
     gaps.forEach(function (p) {
-      p.delta = Math.round(Math.max(-p.len * 0.5, Math.min(sr * 0.6, change * p.len / gapTotal)));
+      p.delta = Math.round(Math.max(-p.len * 0.5, Math.min(p.len * 0.8, sr * 0.3, change * p.len / gapTotal)));
       total += p.delta;
     });
 

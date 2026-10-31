@@ -143,13 +143,66 @@
     } catch (e) {}
   }
 
+  // --- Скрытые готовые фразы ---
+  // Номера готовых фраз, которые пользователь убрал из прослушивания, — отдельно для каждого времени суток.
+  // Скрытая фраза остаётся в списке (бледной), её можно вернуть. При воспроизведении она пропускается
+  // тем же способом, что и своя фраза, пока озвучивается, — порядок фраз не меняется.
+  var HIDDEN_KEY = 'affirmations-hidden';
+  var hidden = { morning: [], day: [], night: [] };
+  function parseHidden(json) {
+    try {
+      var o = JSON.parse(json);
+      if (!o || typeof o !== 'object') return;
+      TIMES.forEach(function (t) {
+        if (Array.isArray(o[t])) hidden[t] = o[t].filter(function (n) { return typeof n === 'number'; });
+      });
+    } catch (e) {}
+  }
+  try { var savedHidden = localStorage.getItem(HIDDEN_KEY); if (savedHidden) parseHidden(savedHidden); } catch (e) {}
+  function persistHidden() {
+    var json = JSON.stringify(hidden);
+    try { localStorage.setItem(HIDDEN_KEY, json); } catch (e) {}
+    if (cloud) { try { cloud.setItem(HIDDEN_KEY, json); } catch (e) {} }
+  }
+  if (cloud) {
+    try {
+      cloud.getItem(HIDDEN_KEY, function (err, value) {
+        if (err || !value || state.mode !== 'stopped') return;
+        parseHidden(value);
+        renderSet(); renderPlayback();
+      });
+    } catch (e) {}
+  }
+  function isHidden(i) { return hidden[state.time].indexOf(i) >= 0; }
+  function toggleHidden(i) {
+    var list = hidden[state.time], at = list.indexOf(i);
+    if (at >= 0) list.splice(at, 1); else list.push(i);
+    persistHidden();
+    haptic('light');
+    renderSet(); renderPlayback();
+    if (state.mode === 'playing') {
+      if (!hasPlayable()) { stopPlayback(); els.statusMsg.textContent = 'Все фразы скрыты — верните хотя бы одну.'; }
+      else replanVoice(); // текущая фраза дозвучит, дальше — без скрытой
+    }
+  }
+  function hasPlayable() { return playlist().some(function (it) { return !it.hidden; }); }
+  // Ближайшая не скрытая фраза от i в сторону dir (1 — вперёд, -1 — назад); -1, если таких нет
+  function playableFrom(i, dir) {
+    var items = playlist(), n = items.length;
+    for (var k = 0; k < n; k++) {
+      var j = (((i + dir * k) % n) + n) % n;
+      if (!items[j].hidden) return j;
+    }
+    return -1;
+  }
+
   // Плейлист текущего времени суток: сначала готовые фразы (с mp3), потом свои (озвучка Яндекса).
   // srcs — файлы озвучки по порядку предпочтения: сначала выбранный голос, потом другой.
   function playlist() {
     var t = state.time;
     var order = [voiceGender].concat(VOICES.filter(function (v) { return v !== voiceGender; }));
     return AFFIRMATIONS[t].phrases.map(function (p, i) {
-      return { text: p, srcs: order.map(function (g) { return voicePath(g, t, i); }), custom: false };
+      return { text: p, srcs: order.map(function (g) { return voicePath(g, t, i); }), custom: false, hidden: hidden[t].indexOf(i) >= 0 };
     }).concat(custom[t].map(function (p, i) {
       return { text: p, srcs: [], custom: true, ci: i };
     }));
@@ -175,6 +228,8 @@
 
   // --- Отрисовка ---
   var PENCIL = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16v4zM14 6l4 4"/></svg>';
+  var EYE = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>';
+  var EYE_OFF = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3l18 18M10.6 5.1A10 10 0 0 1 12 5c6.5 0 10 7 10 7a17 17 0 0 1-3.2 4.1M6.6 6.6A17 17 0 0 0 2 12s3.5 7 10 7a9.7 9.7 0 0 0 5.4-1.6M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg>';
 
   function tagHtml(item) {
     var l = customLabel(item);
@@ -189,9 +244,12 @@
     els.input.placeholder = INPUT_HINT[state.time];
     els.clearBtn.hidden = custom[state.time].length === 0;
     els.listCard.innerHTML = items.map(function (item, i) {
-      return '<div class="list-row" role="button" tabindex="0" data-idx="' + i + '">' +
+      return '<div class="list-row' + (item.hidden ? ' is-hidden' : '') + '" role="button" tabindex="0" data-idx="' + i + '">' +
         '<span class="num">' + pad(i + 1) + '</span>' +
-        '<span class="text">' + escapeHtml(item.text) + (item.custom ? tagHtml(item) : '') + '</span>' +
+        '<span class="text">' + escapeHtml(item.text) + (item.custom ? tagHtml(item) : '') +
+          (item.hidden ? '<span class="tag tag-muted">скрыта</span>' : '') + '</span>' +
+        (item.custom ? '' : '<button class="hide-btn" data-idx="' + i + '" aria-label="' +
+          (item.hidden ? 'Вернуть фразу' : 'Скрыть фразу') + '">' + (item.hidden ? EYE : EYE_OFF) + '</button>') +
         (item.custom ? '<button class="edit-btn" data-ci="' + item.ci + '" aria-label="Изменить фразу">' + PENCIL + '</button>' +
           '<button class="remove-btn" data-ci="' + item.ci + '" aria-label="Удалить фразу">×</button>' : '') +
         '</div>';
@@ -232,6 +290,10 @@
   // Нажатие на фразу — играть с неё; на крестик — удалить свою фразу
   els.listCard.addEventListener('click', function (e) {
     if (e.target.closest('.edit-input')) return; // нажатие внутри поля правки — не включать фразу
+    var hideBtn = e.target.closest('.hide-btn');
+    if (hideBtn) { toggleHidden(parseInt(hideBtn.getAttribute('data-idx'), 10)); return; }
+    var hiddenRow = e.target.closest('.list-row.is-hidden');
+    if (hiddenRow) { toggleHidden(parseInt(hiddenRow.getAttribute('data-idx'), 10)); return; }
     var edit = e.target.closest('.edit-btn');
     if (edit) { startEdit(edit.closest('.list-row'), parseInt(edit.getAttribute('data-ci'), 10)); return; }
     var remove = e.target.closest('.remove-btn');
@@ -490,6 +552,7 @@
   // Звук для фразы: выбранный голос → другой голос → null (тогда читает голос устройства).
   // Своя фраза — озвучка Яндекса (см. ниже); 'skip' — ещё озвучивается, пока пропускаем.
   function resolveVoice(item, rate) {
+    if (item.hidden) return Promise.resolve('skip'); // скрытая — пропускаем
     if (item.custom) return customVoice(item, rate);
     var srcs = item.srcs.filter(function (s) { return !missing[s]; }), k = 0;
     var attempt = function () {
@@ -949,6 +1012,7 @@
 
   function mediaKey(items) {
     return state.time + '|' + voiceGender + '|' + voiceRate + '|' + items.map(function (it) {
+      if (it.hidden) return '(скрыта)';
       if (!it.custom) return it.text;
       var st = customState[customKey(it.text, voiceGender, state.time)];
       return it.text + (st && st.status === 'ready' ? '+' : '-'); // готовность своих фраз — тоже часть дорожки
@@ -1369,6 +1433,8 @@
 
   function playFrom(i) {
     els.statusMsg.textContent = '';
+    i = playableFrom(i, 1);
+    if (i < 0) { els.statusMsg.textContent = 'Все фразы скрыты — верните хотя бы одну.'; return; }
     resumeFrom = null;
     var wasPlaying = state.mode === 'playing';
     state.mode = 'playing';
@@ -1440,7 +1506,8 @@
     var items = playlist();
     if (!items.length) return;
     var base = state.currentIndex === null ? (delta > 0 ? -1 : 0) : state.currentIndex;
-    var i = ((base + delta) % items.length + items.length) % items.length;
+    var i = playableFrom(base + delta, delta > 0 ? 1 : -1); // скрытые фразы перешагиваем
+    if (i < 0) return;
     haptic('light');
     if (state.mode === 'playing') { startVoice(i); return; }
     resumeFrom = null;

@@ -174,6 +174,8 @@
   });
 
   // --- Отрисовка ---
+  var PENCIL = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16v4zM14 6l4 4"/></svg>';
+
   function tagHtml(item) {
     var l = customLabel(item);
     return '<span class="' + l.cls + '">' + l.text + '</span>';
@@ -190,7 +192,8 @@
       return '<div class="list-row" role="button" tabindex="0" data-idx="' + i + '">' +
         '<span class="num">' + pad(i + 1) + '</span>' +
         '<span class="text">' + escapeHtml(item.text) + (item.custom ? tagHtml(item) : '') + '</span>' +
-        (item.custom ? '<button class="remove-btn" data-ci="' + item.ci + '" aria-label="Удалить фразу">×</button>' : '') +
+        (item.custom ? '<button class="edit-btn" data-ci="' + item.ci + '" aria-label="Изменить фразу">' + PENCIL + '</button>' +
+          '<button class="remove-btn" data-ci="' + item.ci + '" aria-label="Удалить фразу">×</button>' : '') +
         '</div>';
     }).join('');
     els.segBtns.forEach(function (b) {
@@ -228,6 +231,9 @@
 
   // Нажатие на фразу — играть с неё; на крестик — удалить свою фразу
   els.listCard.addEventListener('click', function (e) {
+    if (e.target.closest('.edit-input')) return; // нажатие внутри поля правки — не включать фразу
+    var edit = e.target.closest('.edit-btn');
+    if (edit) { startEdit(edit.closest('.list-row'), parseInt(edit.getAttribute('data-ci'), 10)); return; }
     var remove = e.target.closest('.remove-btn');
     if (remove) {
       stopPlayback();
@@ -240,6 +246,54 @@
     if (!row) return;
     playFrom(parseInt(row.getAttribute('data-idx'), 10));
   });
+  // Правка своей фразы: текст превращается в поле ввода. Enter или нажатие мимо — сохранить,
+  // Esc — отменить. Новый текст озвучивается заново; пустой — фраза удаляется.
+  function startEdit(row, ci) {
+    var time = state.time, old = custom[time][ci];
+    if (!row || old === undefined) return;
+    var textEl = row.querySelector('.text');
+    // Многострочное поле, растёт по высоте под текст — видна вся фраза
+    var input = document.createElement('textarea');
+    input.className = 'edit-input';
+    input.value = old;
+    input.maxLength = 200;
+    input.rows = 1;
+    var fit = function () { input.style.height = 'auto'; input.style.height = input.scrollHeight + 'px'; };
+    input.addEventListener('input', fit);
+    input.setAttribute('enterkeyhint', 'done');
+    input.setAttribute('aria-label', 'Текст фразы');
+    textEl.replaceWith(input);
+    row.classList.add('editing');
+    fit();
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+    haptic('light');
+
+    var finished = false;
+    function finish(save) {
+      if (finished) return;
+      finished = true;
+      var v = cleanPhrase(input.value);
+      var changed = false;
+      if (save && time === state.time && custom[time][ci] === old) {
+        if (!v) { custom[time].splice(ci, 1); changed = true; }
+        else if (v !== old) { custom[time][ci] = v; changed = true; }
+      }
+      if (changed) { persistCustom(); haptic('medium'); }
+      renderSet(); renderPlayback();
+      if (changed) {
+        ensureCustom();                              // новый текст — новая озвучка
+        if (state.mode === 'playing') replanVoice(); // старый текст больше не звучит
+      }
+    }
+    input.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+      else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+      e.stopPropagation();
+    });
+    input.addEventListener('blur', function () { finish(true); });
+  }
+
   els.listCard.addEventListener('keydown', function (e) {
     if ((e.key === 'Enter' || e.key === ' ') && e.target.classList.contains('list-row')) {
       e.preventDefault();

@@ -46,3 +46,35 @@
 - `400 empty | too_long | bad_voice`
 - `429 limit_user` — дневной лимит человека; `429 limit_total` — месячный предел на всех
 - `502 tts_failed` — SpeechKit или хранилище не ответили
+
+---
+
+# Бот: приветствие и аффирмация дня (`bot.js`)
+
+Отдельная функция `affirmacii-bot`. Отвечает на `/start` и `/stop`, а раз в день (таймер) рассылает
+подписчикам одну аффирмацию текстом с кнопкой «Слушать». Подписчики — в том же хранилище, `bot/subscribers/`.
+
+### А. Функция
+Cloud Functions → **Создать функцию** `affirmacii-bot` → включить **«Публичная функция»** →
+**Редактор**: Node.js 22, файл `index.js` = содержимое `server/bot.js`, точка входа `index.handler`,
+таймаут `60` секунд, память `128 МБ`, сервисный аккаунт `affirmacii-function`. Переменные окружения:
+
+| Ключ | Значение |
+|---|---|
+| `BOT_TOKEN` | токен бота (секрет) |
+| `WEBHOOK_SECRET` | любое придуманное слово из латинских букв и цифр, 20+ символов (секрет) |
+| `BUCKET` | `affirmacii-voice` |
+| `APP_URL` | `https://gaer-333.github.io/affirmacii-bot/` |
+
+### Б. Вебхук — сказать Telegram, куда присылать сообщения
+Открыть в браузере (подставив свои значения, без пробелов и угловых скобок):
+```
+https://api.telegram.org/bot<ТОКЕН>/setWebhook?url=<ССЫЛКА_ФУНКЦИИ>&secret_token=<WEBHOOK_SECRET>&allowed_updates=["message","my_chat_member"]
+```
+Ответ должен быть `{"ok":true,"result":true,"description":"Webhook was set"}`.
+
+### В. Таймер — рассылка каждый день в 9:00 по Москве
+1. Сервисному аккаунту `affirmacii-function` добавить роль `functions.functionInvoker`.
+2. Cloud Functions → **Триггеры** → **Создать триггер**: имя `affirmacii-daily`, тип **Таймер**,
+   cron-выражение `0 6 ? * * *` (6:00 по UTC = 9:00 по Москве), функция `affirmacii-bot`, тег `$latest`,
+   сервисный аккаунт `affirmacii-function`.

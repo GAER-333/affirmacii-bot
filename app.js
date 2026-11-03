@@ -14,14 +14,18 @@
     tg.expand();  // раскрываем мини-приложение на всю высоту
     // Чтобы свайп по переключателю или прокрутка вверх не сворачивали приложение
     try { if (tg.isVersionAtLeast('7.7')) tg.disableVerticalSwipes(); } catch (e) {}
+    // Во весь экран (Telegram 8.0+): космос уходит под часы и чёлку, без шапки Telegram.
+    // Только на телефонах — на компьютере это окно на весь монитор.
+    try {
+      if (tg.isVersionAtLeast('8.0') && tg.requestFullscreen && /^(ios|android)$/.test(tg.platform)) tg.requestFullscreen();
+    } catch (e) {}
   }
 
-  // «Щелчок» линейки таймера. На iPhone «щелчок выбора» отчётливый, а на Android Telegram
-  // делает его еле заметным — там вместо него толчок средней силы (подобрали на Samsung).
+  // «Щелчок» линейки таймера: толчок средней силы — подобрали на Samsung, на iPhone «щелчок выбора»
+  // тоже оказался слишком слабым.
   function tick() {
     if (inTelegram && tg.HapticFeedback) {
-      if (/Android/i.test(navigator.userAgent)) tg.HapticFeedback.impactOccurred('medium');
-      else tg.HapticFeedback.selectionChanged();
+      tg.HapticFeedback.impactOccurred('medium');
     } else if (navigator.vibrate) {
       navigator.vibrate(10);
     }
@@ -275,6 +279,8 @@
   });
 
   // --- Отрисовка ---
+  var PLAY_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15l13-7.5z"/></svg>';
+  var PAUSE_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="4.5" width="4.2" height="15" rx="1.2"/><rect x="13.8" y="4.5" width="4.2" height="15" rx="1.2"/></svg>';
   var PENCIL = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16v4zM14 6l4 4"/></svg>';
   var EYE = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>';
   var EYE_OFF = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3l18 18M10.6 5.1A10 10 0 0 1 12 5c6.5 0 10 7 10 7a17 17 0 0 1-3.2 4.1M6.6 6.6A17 17 0 0 0 2 12s3.5 7 10 7a9.7 9.7 0 0 0 5.4-1.6M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg>';
@@ -326,7 +332,7 @@
       row.classList.toggle('live', hasCurrent && i === state.currentIndex);
     });
 
-    els.playIcon.textContent = playing ? '❚❚' : '▶';
+    els.playIcon.innerHTML = playing ? PAUSE_ICON : PLAY_ICON; // свои иконки: «▶» на iPhone рисуется эмодзи
     els.playLabel.textContent = playing ? 'Пауза' : state.mode === 'paused' ? 'Продолжить' : 'Слушать';
     els.playBtn.disabled = items.length === 0;
     els.prevBtn.disabled = els.nextBtn.disabled = items.length === 0;
@@ -1855,6 +1861,15 @@
   }
   document.addEventListener('visibilitychange', onReturn);
   if (inTelegram) { try { tg.onEvent('activated', onReturn); } catch (e) {} }
+
+  // --- Никакого зума ---
+  // iPhone может масштабировать страницу двумя пальцами, даже если это запрещено в настройках страницы
+  ['gesturestart', 'gesturechange'].forEach(function (ev) {
+    document.addEventListener(ev, function (e) { e.preventDefault(); });
+  });
+  document.addEventListener('touchmove', function (e) {
+    if (e.touches && e.touches.length > 1) e.preventDefault();
+  }, { passive: false });
 
   // --- Первый запуск ---
   applyTheme(true);

@@ -1043,16 +1043,19 @@
     if (cur.i !== state.currentIndex) { state.currentIndex = cur.i; renderPlayback(); }
   }
 
-  // --- Android: готовые дорожки в обычных плеерах ---
-  // Telegram на Android, когда приложение свёрнуто, глушит звук, который страница собирает сама
-  // (Web Audio), а если пропустить его через аудиоплеер — в фоне он хрипит. Обычные аудиоплееры
-  // с готовыми файлами Telegram не трогает. Поэтому на Android:
+  // --- Телефоны: готовые дорожки в обычных плеерах ---
+  // Telegram на телефонах (и на Android, и на iPhone), когда приложение свёрнуто, глушит звук,
+  // который страница собирает сама (Web Audio), а если пропустить его через аудиоплеер — в фоне
+  // он хрипит. Обычные аудиоплееры с готовыми файлами Telegram не трогает. Поэтому на телефонах:
   //  — голос: все фразы с паузами заранее склеиваются в одну дорожку, она играет по кругу —
   //    в фоне не нужно ничего запускать;
   //  — музыка: mp3 в обычном плеере. В свёрнутом приложении текущий трек повторяется,
   //    при открытом треки сменяют друг друга.
   // Свои фразы (их читает голос устройства) в склеенную дорожку не попадают.
-  function mediaMode() { return isAndroid; }
+  // На iPhone у аудиоплеера нельзя менять громкость из приложения, поэтому там:
+  //  — громкость голоса «вшита» в склеенную дорожку (ползунок «Голос» пересобирает её);
+  //  — музыка — заранее приглушённые версии треков (audio/music-ios), ползунка «Музыка» нет.
+  function mediaMode() { return isAndroid || isIOS; }
   var mv = null;                 // склеенный голос: { key, url, segs: [{ i, start, end }] }
   var voiceEl = null, musicEl = null;
 
@@ -1065,7 +1068,7 @@
   }
 
   function mediaKey(items) {
-    return state.time + '|' + voiceGender + '|' + voiceRate + '|' + items.map(function (it) {
+    return state.time + '|' + voiceGender + '|' + voiceRate + '|' + (isIOS ? 'v' + els.voiceVolume.value + '|' : '') + items.map(function (it) {
       if (it.hidden) return '(скрыта)';
       if (!it.custom) return it.text;
       var st = customState[customKey(it.text, voiceGender, state.time)];
@@ -1089,7 +1092,7 @@
       var data = new Float32Array(total), pos = 0, segs = [];
       vs.forEach(function (v, i) {
         if (!v) return;
-        var b = v.buffer, chs = b.numberOfChannels, g = v.gain / chs;
+        var b = v.buffer, chs = b.numberOfChannels, g = v.gain / chs * (isIOS ? voiceGain() : 1);
         for (var c = 0; c < chs; c++) {
           var src = b.getChannelData(c);
           for (var k = 0; k < src.length; k++) data[pos + k] += src[k] * g;
@@ -1152,8 +1155,11 @@
     while (n < MAX_TRACKS && (musicKey(time, n) in levels)) n++;
     return n;
   }
+  function mediaMusicUrl(time, k) {
+    return isIOS ? 'audio/music-ios/' + musicKey(time, k) + '.mp3' : musicUrl(time, k);
+  }
   function applyMusicElVolume() {
-    if (!musicEl) return;
+    if (!musicEl || isIOS) return; // на iPhone громкость уже «вшита» в тихую версию трека
     var lv = (window.MUSIC_LEVELS || {})[musicKey(musicTime, musicTrack)] || 0;
     var g = musicGainFor(parseInt(els.musicVolume.value, 10)) * Tone.dbToGain(MUSIC_VOLUME_DB + lv);
     musicEl.volume = Math.max(0, Math.min(1, g));
@@ -1177,7 +1183,7 @@
     if (musicTime !== time) { musicTime = time; musicTrack = 0; musicEl.removeAttribute('src'); }
     if (!n) return; // треков нет
     if (musicTrack >= n) musicTrack = 0;
-    var url = new URL(musicUrl(time, musicTrack), location.href).href;
+    var url = new URL(mediaMusicUrl(time, musicTrack), location.href).href;
     if (musicEl.src !== url) musicEl.src = url;
     applyMusicElVolume();
     playMusicEl();
@@ -1190,7 +1196,7 @@
     var d = musicEl.duration, n = musicCount(musicTime);
     if (!d || n < 2 || musicEl.currentTime < d - 0.6) return;
     musicTrack = (musicTrack + 1) % n;
-    musicEl.src = musicUrl(musicTime, musicTrack);
+    musicEl.src = mediaMusicUrl(musicTime, musicTrack);
     applyMusicElVolume();
     playMusicEl();
   }
@@ -1355,8 +1361,30 @@
   function applyVoiceVolume(v) {
     els.voiceVolume.style.setProperty('--fill', v + '%');
     if (voiceBus) voiceBus.gain.setTargetAtTime(Math.pow(v / 100, 2), audioCtx().currentTime, 0.05);
-    if (voiceEl) voiceEl.volume = Math.min(1, Math.pow(v / 100, 2));
+    if (voiceEl && !isIOS) voiceEl.volume = Math.min(1, Math.pow(v / 100, 2));
+    if (isIOS) rebakeVoiceSoon();
     // Голос устройства меняет громкость только со следующей фразы
+  }
+
+  // iPhone: громкость голоса «вшита» в дорожку — после движения ползунка пересобираем её
+  // и продолжаем ровно с того же места (порядок фраз и паузы те же, меняется только громкость)
+  var rebakeId = null;
+  function rebakeVoiceSoon() {
+    clearTimeout(rebakeId);
+    rebakeId = setTimeout(function () {
+      if (!mediaMode() || !voiceEl || !mv || voiceEl.src !== mv.url) return;
+      var t = voiceEl.currentTime, wasPlaying = !voiceEl.paused, my = session;
+      buildVoiceTrack(playlist()).then(function (track) {
+        if (!track || my !== session || voiceEl.src === track.url) return;
+        voiceEl.src = track.url;
+        var go = function () {
+          if (my !== session) return;
+          try { voiceEl.currentTime = t; } catch (e) {}
+          if (wasPlaying && state.mode === 'playing') { var p = voiceEl.play(); if (p && p.catch) p.catch(playFailed); }
+        };
+        if (voiceEl.readyState >= 1) go(); else voiceEl.addEventListener('loadedmetadata', go, { once: true });
+      });
+    }, 400);
   }
   // Где в треке начинается и заканчивается звук (обрезаем тишину) и насколько он громкий
   function describeTrack(buf) {
@@ -1454,7 +1482,7 @@
     (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   var carrier = null;
   function startCarrier() {
-    if (!isIOS) return;
+    if (!isIOS || mediaMode()) return; // на телефонах играют настоящие плееры — несущая не нужна
     try {
       if (!carrier) {
         // 30 секунд почти тишины: еле заметный шум на −80 дБ — его не слышно,
@@ -1495,7 +1523,18 @@
     Tone.start().then(startMusic).catch(function () {});
     ensureBuses();
     startCarrier();
-    if (mediaMode()) startMusicMedia();
+    if (mediaMode()) {
+      ensureMediaEls();
+      // Склеенная дорожка готовится долю секунды — iPhone к тому времени уже «забудет» нажатие.
+      // Поэтому прямо в нажатии запускаем плеер голоса с короткой тишиной: дальше ему можно звучать.
+      if (isIOS && !voiceEl.src) {
+        voiceEl.src = URL.createObjectURL(encodeWav({ numberOfChannels: 1, sampleRate: 8000, length: 800,
+          getChannelData: function () { return new Float32Array(800); } }));
+        var up = voiceEl.play();
+        if (up && up.catch) up.catch(function () {});
+      }
+      startMusicMedia();
+    }
     if (!resumeIntervalId) {
       // Chrome иногда «засыпает» посреди долгой озвучки голосом устройства — будим
       resumeIntervalId = setInterval(function () {
@@ -1870,6 +1909,9 @@
   document.addEventListener('touchmove', function (e) {
     if (e.touches && e.touches.length > 1) e.preventDefault();
   }, { passive: false });
+
+  // На iPhone громкость музыки менять из приложения нельзя — ползунок не показываем
+  if (isIOS) { var musicRow = els.musicVolume.closest('.card-row'); if (musicRow) musicRow.style.display = 'none'; }
 
   // --- Первый запуск ---
   applyTheme(true);

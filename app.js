@@ -423,6 +423,9 @@
     if (window.SolarSystem) SolarSystem.setMode(state.time, instant);
     if (inTelegram) {
       try { tg.setHeaderColor(SKY_TOP[state.time]); tg.setBackgroundColor(THEME_BG[state.time]); } catch (e) {}
+      // Нижняя панель Telegram (полоса у жестов «домой»): по умолчанию она в цвете темы Telegram —
+      // светлая полоска под нашим тёмным экраном. Красим её в цвет фона приложения.
+      try { if (tg.isVersionAtLeast('7.10') && tg.setBottomBarColor) tg.setBottomBarColor(THEME_BG[state.time]); } catch (e) {}
     }
   }
 

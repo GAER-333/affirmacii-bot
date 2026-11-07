@@ -168,6 +168,29 @@ async function sendDaily(token) {
   return { sent: sent, off: off, failed: failed };
 }
 
+// --- Забрать новые сообщения у Telegram самим (без вебхука) ---
+// Пока Яндекс не пускает к функциям запросы из-за границы, Telegram не может прислать нам сообщения
+// сам. Тогда таймер раз в минуту запускает функцию с данными «poll», и она забирает накопившиеся
+// сообщения (getUpdates). Номер последнего обработанного сообщения хранится в bot/state.json.
+// Важно: пока у бота включён вебхук, getUpdates не работает — его нужно отключить (deleteWebhook).
+async function pollUpdates(token) {
+  let offset = 0;
+  const st = await s3(token, 'GET', 'bot/state.json');
+  if (st.ok) { try { offset = (await st.json()).offset || 0; } catch (e) {} }
+  const r = await tg('getUpdates', { offset: offset, timeout: 0, limit: 100, allowed_updates: ['message', 'my_chat_member'] });
+  if (!r.ok) {
+    console.error('getUpdates: ' + r.status + ' ' + JSON.stringify(r.data).slice(0, 200)); // 409 — включён вебхук
+    return { polled: 0, error: r.status };
+  }
+  const updates = r.data.result || [];
+  for (const u of updates) {
+    try { await onUpdate(token, u); } catch (e) { console.error(e && e.message); }
+    offset = u.update_id + 1;
+  }
+  if (updates.length) await s3(token, 'PUT', 'bot/state.json', JSON.stringify({ offset: offset }));
+  return { polled: updates.length };
+}
+
 // --- Главное ---
 module.exports.handler = async function (event, context) {
   const token = context && context.token && context.token.access_token;
@@ -177,7 +200,9 @@ module.exports.handler = async function (event, context) {
   const isTimer = event && Array.isArray(event.messages) && event.messages.some((m) =>
     m && m.event_metadata && /TimerMessage/.test(m.event_metadata.event_type || ''));
   if (isTimer) {
-    const result = await sendDaily(token);
+    // Таймер с данными «poll» — забрать сообщения; без данных — утренняя рассылка
+    const payload = event.messages.map((m) => (m.details && m.details.payload) || '').join('');
+    const result = payload.trim() === 'poll' ? await pollUpdates(token) : await sendDaily(token);
     return { statusCode: 200, body: JSON.stringify(result) };
   }
 
@@ -194,4 +219,4 @@ module.exports.handler = async function (event, context) {
   return { statusCode: 200, body: 'ok' }; // Telegram должен получить 200, иначе будет повторять
 };
 
-module.exports._test = { phraseOfDay, dailyText, loadPhrases };
+module.exports._test = { phraseOfDay, dailyText, loadPhrases, pollUpdates };

@@ -90,3 +90,29 @@ Telegram шлёт вебхук из-за границы, и сейчас он д
 
 Когда доступ из-за границы вернётся: удалить триггер `affirmacii-poll` и снова включить вебхук (шаг Б) —
 бот снова будет отвечать мгновенно.
+
+---
+
+# Бот на Cloudflare Workers (`worker.js`) — основной вариант
+
+Из Яндекс Облака сейчас нет связи с Telegram (ни входящей, ни исходящей — проверено 07.11.2026),
+поэтому бот живёт на Cloudflare Workers: бесплатно, серверы за границей, Telegram доступен в обе стороны.
+Логика та же, что в `bot.js`; подписчики — в хранилище Cloudflare KV.
+
+1. **Воркер:** dash.cloudflare.com → **Workers & Pages** → **Create** → **Create Worker** (Hello World) →
+   имя `affirmacii-bot` → **Deploy**. Потом **Edit code** → заменить весь код на `server/worker.js` → **Deploy**.
+2. **Хранилище:** **Storage & Databases → KV** → **Create** → имя `affirmacii-subs`.
+3. **Подключить хранилище к воркеру:** воркер → **Settings → Bindings → Add → KV namespace**:
+   Variable name `SUBS`, namespace `affirmacii-subs` → сохранить.
+4. **Секреты:** воркер → **Settings → Variables and Secrets → Add**, тип **Secret**:
+   `BOT_TOKEN` = токен бота, `WEBHOOK_SECRET` = секретное слово → сохранить (Deploy).
+5. **Таймер:** воркер → **Settings → Trigger events (Triggers) → Cron Triggers → Add**:
+   `*/5 6 * * *` — каждые 5 минут с 6:00 до 6:55 по UTC (9:00–9:55 по Москве), порциями по 45 человек.
+6. **Адрес воркера** (вида `https://affirmacii-bot.<ваше-имя>.workers.dev`) — открыть в браузере:
+   должно быть «Бот аффирмаций работает 🌙».
+7. **Подключить бота:** открыть в браузере
+   `https://api.telegram.org/bot<ТОКЕН>/setWebhook?url=<АДРЕС_ВОРКЕРА>&secret_token=<WEBHOOK_SECRET>&allowed_updates=["message","my_chat_member"]`.
+8. В Яндексе удалить триггеры `affirmacii-poll` и `affirmacii-daily` (функция `affirmacii-bot` больше не нужна).
+
+Ограничения бесплатного тарифа: 100 000 сообщений боту в день, рассылка — до ~540 подписчиков
+(12 запусков × 45). Больше — платный тариф Workers ($5/мес) или увеличить окно рассылки.

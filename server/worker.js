@@ -127,6 +127,19 @@ async function sendDailyBatch(env, now) {
 
 export default {
   async fetch(request, env, ctx) {
+    // Ручной запуск рассылки (проверить, не дожидаясь утра):
+    //   <адрес воркера>/daily?key=<WEBHOOK_SECRET>          — разослать тем, кто сегодня ещё не получил
+    //   <адрес воркера>/daily?key=<WEBHOOK_SECRET>&force=1  — разослать всем ещё раз (для проверки)
+    const url = new URL(request.url);
+    if (request.method === 'GET' && url.pathname === '/daily') {
+      if (!env.WEBHOOK_SECRET || url.searchParams.get('key') !== env.WEBHOOK_SECRET) return new Response('unauthorized', { status: 401 });
+      const now = new Date();
+      if (url.searchParams.get('force') === '1') {
+        await env.SUBS.delete('daily:' + new Date(now.getTime() + 3 * 3600 * 1000).toISOString().slice(0, 10));
+      }
+      const result = await sendDailyBatch(env, now);
+      return new Response(JSON.stringify(result), { headers: { 'Content-Type': 'application/json; charset=utf-8' } });
+    }
     if (request.method !== 'POST') return new Response('Бот аффирмаций работает 🌙', { headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
     if (!env.WEBHOOK_SECRET || request.headers.get('X-Telegram-Bot-Api-Secret-Token') !== env.WEBHOOK_SECRET) {
       return new Response('unauthorized', { status: 401 });
